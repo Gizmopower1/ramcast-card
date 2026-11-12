@@ -45,7 +45,7 @@ Sørg også for at hver spiller er **aktivert** og har **Expose player to Home A
 
 1. Kopier `racast-card.js` til `/config/www/racast/racast-card.js`
 2. **Innstillinger → Dashbord → ⋮ → Ressurser → Legg til ressurs**
-   - URL: `/local/racast/racast-card.js?v=2.1.0`
+   - URL: `/local/racast/racast-card.js?v=2.2.0`
    - Type: **JavaScript-modul**
 3. Hard-oppdater nettleseren (Ctrl+Shift+R)
 
@@ -68,7 +68,7 @@ views:
       - type: custom:racast-card
 ```
 
-Uten noen innstillinger viser utgangsmenyen alle høyttalere og Music Assistant-spillere, og første MA-spiller er standard. Bruk `ma_players` for å koble en Cast-høyttaler til sin MA-spiller (da vises bare Cast-navnet, men avspillingen går via MA), eller `ma_only: true` for å vise bare MA-spillere.
+Uten noen innstillinger finner kortet selv hvilken Music Assistant-spiller som hører til hver Cast-høyttaler (de har samme enhets-ID). Høyttaleren vises én gang, med Cast-navnet, og spilles via Music Assistant. Standardutgang er en MA-gruppe hvis du har en, ellers første MA-spiller. Bruk `ma_only: true` for å skjule høyttalere som ikke finnes i Music Assistant.
 
 ## Innstillinger
 
@@ -76,7 +76,8 @@ Uten noen innstillinger viser utgangsmenyen alle høyttalere og Music Assistant-
 |---|---|---|
 | `title` | `RACast` | Navnet øverst til venstre |
 | `default_player` | første MA-spiller | Standard utgang |
-| `ma_players` | `{}` | Kobler en vanlig Cast-entitet til tilsvarende MA-spiller, f.eks. `media_player.stue: media_player.stue_ma`. Menyen viser Cast-navnet, men avspillingen går via MA |
+| `ma_players` | `{}` | Kobler en Cast-entitet til en MA-spiller manuelt, f.eks. `media_player.stue: media_player.stue_ma`. Trengs vanligvis ikke (se `auto_twins`), men overstyrer den automatiske koblingen |
+| `auto_twins` | `true` | Finn Cast → MA-spiller automatisk via enhetsregisteret |
 | `extra_players` | `[]` | Ekstra utganger som ikke er høyttalere (f.eks. en Chromecast/Google TV) |
 | `players` | auto | Fast liste over utganger i menyen |
 | `ma_only` | `false` | `true`: vis bare utganger som spilles via Music Assistant – MA-spillere og Cast-utganger som har en MA-spiller i `ma_players` (vises med Cast-navnet). Anbefalt når alle høyttalerne er i MA |
@@ -90,10 +91,6 @@ Eksempel med Cast-gruppe og TV:
 ```yaml
 type: custom:racast-card
 default_player: media_player.hele_huset
-ma_players:
-  media_player.hele_huset: media_player.hele_huset_ma
-  media_player.stue: media_player.stue_ma
-  media_player.tv: media_player.tv_ma
 extra_players:
   - media_player.tv
 ma_only: true          # skjul utganger som ikke går via Music Assistant
