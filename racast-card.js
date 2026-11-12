@@ -20,7 +20,7 @@
  * Favoritter og rekkefølge lagres per HA-bruker (frontend/user_data), synkes mellom enheter.
  */
 
-const VERSION = "2.0.0";
+const VERSION = "2.0.1";
 // Alle faste kanaler ligger i MA sitt radiobibliotek (builtin/add_radio) med navn + logo, nøklet på st.url.
 // MA slår opp URL-en der, så TV-en viser riktig navn og logo. Nye faste kanaler må legges inn i MA på samme måte.
 // Søketreff spilles via Radio Browser-kilden i MA, som har egne navn + logoer.
@@ -112,8 +112,8 @@ class RadioNorgeCard extends HTMLElement {
       extra_players: [],
       // true: brukere admin ikke har satt opp får bare standardutgangen. false: de ser alle.
       restrict_outputs: false,
-      // vis bare Music Assistant-spillere (+ extra_players). Tom = automatisk: ja når MA finnes og ma_players ikke er satt
-      ma_only: null,
+      // true: vis bare Music Assistant-spillere (+ extra_players). Standard: alle høyttalere og MA-spillere
+      ma_only: false,
       // (overgang) todo-liste med kategorier fra en eldre versjon som hver bruker henter sine egne fra én gang
       import_categories_from: null,
       ...config,
@@ -264,7 +264,7 @@ class RadioNorgeCard extends HTMLElement {
     this._sys.users = this._sys.users || {};
     const render = () => {
       el.innerHTML = `<div class="sethead"><b>Utganger per bruker</b><button class="close">Ferdig</button></div>
-        <p class="sethint">Trykk på utgangene en bruker skal få bruke. Administratorer ser alltid alle. Har en bruker ingen valgt, får den bare «${esc(defName)}».</p>
+        <p class="sethint">Trykk på utgangene en bruker skal få bruke. Administratorer ser alltid alle. ${this._config.restrict_outputs ? `Har en bruker ingen valgt, får den bare «${esc(defName)}».` : "Har en bruker ingen valgt, ser den alle utganger."}</p>
         ${persons.map((p) => {
           const pol = this._sys.users[p.uid] || {}, al = pol.allowed || [];
           return `<div class="setuser" data-uid="${esc(p.uid)}"><div class="setname">${esc(p.name)}</div>
@@ -400,7 +400,7 @@ class RadioNorgeCard extends HTMLElement {
     }
     const twins = new Set(Object.values(this._config.ma_players || {}));
     const isMA = (i) => states[i] && states[i].attributes.mass_player_type;
-    const maOnly = this._config.ma_only ?? (!Object.keys(this._config.ma_players || {}).length && ids.some(isMA));
+    const maOnly = this._config.ma_only === true;
     if (maOnly && !this._config.players) ids = ids.filter(isMA);
     ids = [...new Set([...ids, ...(this._config.extra_players || [])])];
     const def = this._defPlayer;
