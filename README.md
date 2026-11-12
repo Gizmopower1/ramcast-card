@@ -37,7 +37,7 @@ RACast spiller derfor alt via Music Assistant. **Viktig innstilling i Music Assi
 
 Med FLAC melder Google-høyttalere ofte avspillingsfeil etter ca. 3 minutter med radio, og strømmen stopper. Med MP3 spiller de stabilt.
 
-Sørg også for at spillerne er aktivert i Music Assistant, slik at de finnes som `media_player`-entiteter i Home Assistant.
+Sørg også for at hver spiller er **aktivert** og har **Expose player to Home Assistant** slått på (under avanserte innstillinger), ellers lager ikke Home Assistant noen MA-spiller for den, og kortet må falle tilbake til direkte Cast.
 
 ## Installasjon
 
@@ -45,7 +45,7 @@ Sørg også for at spillerne er aktivert i Music Assistant, slik at de finnes so
 
 1. Kopier `racast-card.js` til `/config/www/racast/racast-card.js`
 2. **Innstillinger → Dashbord → ⋮ → Ressurser → Legg til ressurs**
-   - URL: `/local/racast/racast-card.js?v=2.0.1`
+   - URL: `/local/racast/racast-card.js?v=2.1.0`
    - Type: **JavaScript-modul**
 3. Hard-oppdater nettleseren (Ctrl+Shift+R)
 
@@ -79,7 +79,7 @@ Uten noen innstillinger viser utgangsmenyen alle høyttalere og Music Assistant-
 | `ma_players` | `{}` | Kobler en vanlig Cast-entitet til tilsvarende MA-spiller, f.eks. `media_player.stue: media_player.stue_ma`. Menyen viser Cast-navnet, men avspillingen går via MA |
 | `extra_players` | `[]` | Ekstra utganger som ikke er høyttalere (f.eks. en Chromecast/Google TV) |
 | `players` | auto | Fast liste over utganger i menyen |
-| `ma_only` | `false` | `true`: vis bare Music Assistant-spillere (pluss `extra_players`) |
+| `ma_only` | `false` | `true`: vis bare utganger som spilles via Music Assistant – MA-spillere og Cast-utganger som har en MA-spiller i `ma_players` (vises med Cast-navnet). Anbefalt når alle høyttalerne er i MA |
 | `admin_users` | `[]` | Bruker-ID-er som kan styre «Utganger per bruker» (i tillegg til HA-eieren) |
 | `restrict_outputs` | `false` | `true`: brukere admin ikke har satt opp, får bare standardutgangen |
 | `bauer_sensor_prefix` | `sensor.radio_np_` | Prefiks for Bauer «spilles nå»-sensorer (se under) |
@@ -96,6 +96,7 @@ ma_players:
   media_player.tv: media_player.tv_ma
 extra_players:
   - media_player.tv
+ma_only: true          # skjul utganger som ikke går via Music Assistant
 admin_users:
   - 0123456789abcdef0123456789abcdef   # bruker-ID (finnes på person-entiteten, attributtet user_id)
 restrict_outputs: true
