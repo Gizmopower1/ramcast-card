@@ -4,7 +4,7 @@
  *
  *   type: custom:racast-card          # (custom:radio-norge-card virker også)
  *   default_player: media_player.x   # valgfritt, ellers første Music Assistant-spiller
- *   ma_players:                      # valgfritt: Cast-spiller -> tilsvarende Music Assistant-spiller
+ *   ma_players:                      # valgfritt: Cast-spiller -> MA-spiller (finnes ellers automatisk)
  *     media_player.kjokken: media_player.kjokken_ma
  *   Se README.md for alle valg.
  *
@@ -20,7 +20,7 @@
  * Favoritter og rekkefølge lagres per HA-bruker (frontend/user_data), synkes mellom enheter.
  */
 
-const VERSION = "2.1.0";
+const VERSION = "2.2.0";
 // Alle faste kanaler ligger i MA sitt radiobibliotek (builtin/add_radio) med navn + logo, nøklet på st.url.
 // MA slår opp URL-en der, så TV-en viser riktig navn og logo. Nye faste kanaler må legges inn i MA på samme måte.
 // Søketreff spilles via Radio Browser-kilden i MA, som har egne navn + logoer.
@@ -103,6 +103,8 @@ class RadioNorgeCard extends HTMLElement {
       bauer_sensor_prefix: "sensor.radio_np_",
       // Cast-spiller -> tilsvarende Music Assistant-spiller (spilles da via MA, se README)
       ma_players: {},
+      // finn Cast-spiller -> MA-spiller selv (samme enhets-ID i enhetsregisteret). ma_players overstyrer
+      auto_twins: true,
       nrk_direct: false,
       title: "RACast", // navnet øverst til venstre
       // hvem som kan styre «Utganger per bruker»: HA-eieren + disse bruker-id-ene (HA sitt admin-flagg brukes ikke,
@@ -140,7 +142,11 @@ class RadioNorgeCard extends HTMLElement {
     if (d && st[d]) return d;
     if (this._autoDef && st[this._autoDef]) return this._autoDef;
     const mp = Object.keys(st).filter((id) => id.startsWith("media_player.") && st[id].state !== "unavailable").sort();
-    this._autoDef = mp.find((id) => st[id].attributes.mass_player_type) || mp.find((id) => st[id].attributes.device_class === "speaker") || null;
+    // helst en MA-gruppe («hele huset»), så en MA-spiller, så en høyttaler
+    const ma = mp.find((id) => st[id].attributes.mass_player_type === "group") || mp.find((id) => st[id].attributes.mass_player_type);
+    // har MA-spilleren en Cast-tvilling, bruk Cast-navnet (det er den som vises i menyen)
+    const cast = ma && Object.entries(this._maMap).find(([, t]) => t === ma);
+    this._autoDef = (cast && st[cast[0]] ? cast[0] : ma) || mp.find((id) => st[id].attributes.device_class === "speaker") || null;
     return this._autoDef;
   }
   getCardSize() { return 12; }
@@ -399,9 +405,9 @@ class RadioNorgeCard extends HTMLElement {
         return s.attributes.device_class === "speaker" || s.attributes.mass_player_type;
       }).sort((a, b) => (states[a].attributes.friendly_name || a).localeCompare(states[b].attributes.friendly_name || b, "nb"));
     }
-    const twins = new Set(Object.values(this._config.ma_players || {}));
+    const maMap = this._maMap;
+    const twins = new Set(Object.values(maMap));
     const isMA = (i) => states[i] && states[i].attributes.mass_player_type;
-    const maMap = this._config.ma_players || {};
     if (this._config.ma_only === true && !this._config.players) ids = ids.filter((i) => isMA(i) || maMap[i]);
     // Cast-utganger med MA-tvilling er alltid med (også grupper/TV uten device_class «speaker»)
     ids = [...new Set([...ids, ...Object.keys(maMap), ...(this._config.extra_players || [])])];
@@ -416,7 +422,7 @@ class RadioNorgeCard extends HTMLElement {
   // spillere vi følger med på: standard + alle med MA-tvilling + tvillingene selv
   _watchIds() {
     if (!this._watchList) {
-      const m = this._config.ma_players || {};
+      const m = this._maMap;
       this._watchList = [...new Set([this._defPlayer, ...Object.keys(m), ...Object.values(m), ...(this._config.players || []), ...(this._config.extra_players || [])])].filter(Boolean);
     }
     return this._watchList;
@@ -463,7 +469,7 @@ class RadioNorgeCard extends HTMLElement {
     let st = this._playingOn(this._player);
     // valgt utgang er stille, men en annen spiller: bytt dit (med mindre brukeren nettopp valgte utgang selv)
     if (!st && Date.now() - (this._userPickedAt || 0) > 60000) {
-      const twins = new Set(Object.values(this._config.ma_players || {}));
+      const twins = new Set(Object.values(this._maMap));
       for (const id of this._watchIds().filter((i) => !twins.has(i) && this._allowed(i))) {
         const s = this._playingOn(id);
         if (s) { this._player = id; st = s; this._sig = null; break; }
@@ -505,7 +511,31 @@ class RadioNorgeCard extends HTMLElement {
   /* ---------- ruting ---------- */
 
   _isMA(id) { const s = this._hass.states[id]; return !!(s && s.attributes.mass_player_type); }
-  _twin(id) { const t = (this._config.ma_players || {})[id]; return t && this._hass.states[t] ? t : null; }
+  _twin(id) { const t = this._maMap[id]; return t && this._hass.states[t] ? t : null; }
+
+  // Cast-spiller -> MA-spiller. Music Assistant bruker Cast-enhetens UUID som spiller-ID, så Cast-enheten
+  // ("cast", "0d90fa99…") og MA-enheten ("music_assistant", "0d90fa99-…") har samme identifikator.
+  get _maMap() {
+    const ents = (this._hass && this._hass.entities) || {}, devs = (this._hass && this._hass.devices) || {};
+    const n = Object.keys(ents).length + Object.keys(devs).length;
+    if (this._config.auto_twins !== false && this._autoTwinsN !== n) {
+      this._autoTwinsN = n;
+      this._watchList = null;
+      const by = {};
+      for (const [eid, e] of Object.entries(ents)) {
+        if (!eid.startsWith("media_player.") || (e.platform !== "cast" && e.platform !== "music_assistant")) continue;
+        const d = devs[e.device_id];
+        for (const [dom, id] of (d && d.identifiers) || []) {
+          if (dom !== e.platform) continue;
+          const k = String(id).toLowerCase().replace(/-/g, "");
+          (by[k] = by[k] || {})[e.platform] = eid;
+        }
+      }
+      this._autoTwins = {};
+      for (const v of Object.values(by)) if (v.cast && v.music_assistant) this._autoTwins[v.cast] = v.music_assistant;
+    }
+    return { ...(this._config.auto_twins !== false ? this._autoTwins : {}), ...(this._config.ma_players || {}) };
+  }
   _route(st, player = this._player) {
     if (this._isMA(player)) return { entity: player, ma: true };
     const twin = this._twin(player);
