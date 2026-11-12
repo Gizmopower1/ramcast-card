@@ -20,7 +20,7 @@
  * Favoritter og rekkefølge lagres per HA-bruker (frontend/user_data), synkes mellom enheter.
  */
 
-const VERSION = "2.0.1";
+const VERSION = "2.1.0";
 // Alle faste kanaler ligger i MA sitt radiobibliotek (builtin/add_radio) med navn + logo, nøklet på st.url.
 // MA slår opp URL-en der, så TV-en viser riktig navn og logo. Nye faste kanaler må legges inn i MA på samme måte.
 // Søketreff spilles via Radio Browser-kilden i MA, som har egne navn + logoer.
@@ -112,7 +112,8 @@ class RadioNorgeCard extends HTMLElement {
       extra_players: [],
       // true: brukere admin ikke har satt opp får bare standardutgangen. false: de ser alle.
       restrict_outputs: false,
-      // true: vis bare Music Assistant-spillere (+ extra_players). Standard: alle høyttalere og MA-spillere
+      // true: vis bare utganger som spilles via Music Assistant – MA-spillere og Cast-utganger som har en
+      // MA-tvilling i ma_players (vises med Cast-navnet). Standard: alle høyttalere og MA-spillere
       ma_only: false,
       // (overgang) todo-liste med kategorier fra en eldre versjon som hver bruker henter sine egne fra én gang
       import_categories_from: null,
@@ -400,9 +401,10 @@ class RadioNorgeCard extends HTMLElement {
     }
     const twins = new Set(Object.values(this._config.ma_players || {}));
     const isMA = (i) => states[i] && states[i].attributes.mass_player_type;
-    const maOnly = this._config.ma_only === true;
-    if (maOnly && !this._config.players) ids = ids.filter(isMA);
-    ids = [...new Set([...ids, ...(this._config.extra_players || [])])];
+    const maMap = this._config.ma_players || {};
+    if (this._config.ma_only === true && !this._config.players) ids = ids.filter((i) => isMA(i) || maMap[i]);
+    // Cast-utganger med MA-tvilling er alltid med (også grupper/TV uten device_class «speaker»)
+    ids = [...new Set([...ids, ...Object.keys(maMap), ...(this._config.extra_players || [])])];
     const def = this._defPlayer;
     ids = [def, ...ids.filter((i) => i !== def && !twins.has(i))];
     return ids.filter((i) => states[i] && states[i].state !== "unavailable" && (all || this._allowed(i))).map((i) => ({
