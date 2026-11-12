@@ -1,0 +1,54 @@
+# Valgfritt: «spilles nå» for Bauer-kanalene (Radio Norge, Radio Rock, NRJ, Topp 40, Vinyl, P24-7 …).
+# Bauer sitt API har ikke CORS, så Home Assistant må hente det. Legg fila i /config/packages/
+# (krever `homeassistant: packages: !include_dir_named packages` i configuration.yaml) og start HA på nytt.
+# Kortet leser sensor.radio_np_<kode> (endre med `bauer_sensor_prefix`).
+rest:
+- resource: https://listenapi.planetradio.co.uk/api9.2/stations_nowplaying/NO
+  scan_interval: 30
+  timeout: 15
+  sensor:
+  - name: Radio NP rno
+    unique_id: radio_np_rno
+    value_template: "{{ (value_json | selectattr('stationCode','eq','rno') | first).stationNowPlaying.nowPlayingTrack | default('') }}"
+    json_attributes_path: "$[?(@.stationCode=='rno')]"
+    json_attributes: [stationNowPlaying, stationOnAir]
+  - name: Radio NP rro
+    unique_id: radio_np_rro
+    value_template: "{{ (value_json | selectattr('stationCode','eq','rro') | first).stationNowPlaying.nowPlayingTrack | default('') }}"
+    json_attributes_path: "$[?(@.stationCode=='rro')]"
+    json_attributes: [stationNowPlaying, stationOnAir]
+  - name: Radio NP nrn
+    unique_id: radio_np_nrn
+    value_template: "{{ (value_json | selectattr('stationCode','eq','nrn') | first).stationNowPlaying.nowPlayingTrack | default('') }}"
+    json_attributes_path: "$[?(@.stationCode=='nrn')]"
+    json_attributes: [stationNowPlaying, stationOnAir]
+  - name: Radio NP top
+    unique_id: radio_np_top
+    value_template: "{{ (value_json | selectattr('stationCode','eq','top') | first).stationNowPlaying.nowPlayingTrack | default('') }}"
+    json_attributes_path: "$[?(@.stationCode=='top')]"
+    json_attributes: [stationNowPlaying, stationOnAir]
+  - name: Radio NP vin
+    unique_id: radio_np_vin
+    value_template: "{{ (value_json | selectattr('stationCode','eq','vin') | first).stationNowPlaying.nowPlayingTrack | default('') }}"
+    json_attributes_path: "$[?(@.stationCode=='vin')]"
+    json_attributes: [stationNowPlaying, stationOnAir]
+  - name: Radio NP ptf
+    unique_id: radio_np_ptf
+    value_template: "{{ (value_json | selectattr('stationCode','eq','ptf') | first).stationNowPlaying.nowPlayingTrack | default('') }}"
+    json_attributes_path: "$[?(@.stationCode=='ptf')]"
+    json_attributes: [stationNowPlaying, stationOnAir]
+  - name: Radio NP kos
+    unique_id: radio_np_kos
+    value_template: "{{ (value_json | selectattr('stationCode','eq','kos') | first).stationNowPlaying.nowPlayingTrack | default('') }}"
+    json_attributes_path: "$[?(@.stationCode=='kos')]"
+    json_attributes: [stationNowPlaying, stationOnAir]
+  - name: Radio NP rn8
+    unique_id: radio_np_rn8
+    value_template: "{{ (value_json | selectattr('stationCode','eq','rn8') | first).stationNowPlaying.nowPlayingTrack | default('') }}"
+    json_attributes_path: "$[?(@.stationCode=='rn8')]"
+    json_attributes: [stationNowPlaying, stationOnAir]
+  - name: Radio NP rrl
+    unique_id: radio_np_rrl
+    value_template: "{{ (value_json | selectattr('stationCode','eq','rrl') | first).stationNowPlaying.nowPlayingTrack | default('') }}"
+    json_attributes_path: "$[?(@.stationCode=='rrl')]"
+    json_attributes: [stationNowPlaying, stationOnAir]
