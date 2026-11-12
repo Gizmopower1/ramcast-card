@@ -45,7 +45,7 @@ Sørg også for at spillerne er aktivert i Music Assistant, slik at de finnes so
 
 1. Kopier `racast-card.js` til `/config/www/racast/racast-card.js`
 2. **Innstillinger → Dashbord → ⋮ → Ressurser → Legg til ressurs**
-   - URL: `/local/racast/racast-card.js?v=2.0.0`
+   - URL: `/local/racast/racast-card.js?v=2.0.1`
    - Type: **JavaScript-modul**
 3. Hard-oppdater nettleseren (Ctrl+Shift+R)
 
@@ -68,7 +68,7 @@ views:
       - type: custom:racast-card
 ```
 
-Uten noen innstillinger velger kortet første Music Assistant-spiller som standard og viser bare MA-spillere i utgangsmenyen.
+Uten noen innstillinger viser utgangsmenyen alle høyttalere og Music Assistant-spillere, og første MA-spiller er standard. Bruk `ma_players` for å koble en Cast-høyttaler til sin MA-spiller (da vises bare Cast-navnet, men avspillingen går via MA), eller `ma_only: true` for å vise bare MA-spillere.
 
 ## Innstillinger
 
@@ -79,7 +79,7 @@ Uten noen innstillinger velger kortet første Music Assistant-spiller som standa
 | `ma_players` | `{}` | Kobler en vanlig Cast-entitet til tilsvarende MA-spiller, f.eks. `media_player.stue: media_player.stue_ma`. Menyen viser Cast-navnet, men avspillingen går via MA |
 | `extra_players` | `[]` | Ekstra utganger som ikke er høyttalere (f.eks. en Chromecast/Google TV) |
 | `players` | auto | Fast liste over utganger i menyen |
-| `ma_only` | auto | Vis bare MA-spillere. Auto = ja når MA finnes og `ma_players` ikke er satt |
+| `ma_only` | `false` | `true`: vis bare Music Assistant-spillere (pluss `extra_players`) |
 | `admin_users` | `[]` | Bruker-ID-er som kan styre «Utganger per bruker» (i tillegg til HA-eieren) |
 | `restrict_outputs` | `false` | `true`: brukere admin ikke har satt opp, får bare standardutgangen |
 | `bauer_sensor_prefix` | `sensor.radio_np_` | Prefiks for Bauer «spilles nå»-sensorer (se under) |
