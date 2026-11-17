@@ -20,7 +20,7 @@
  * Favoritter og rekkefølge lagres per HA-bruker (frontend/user_data), synkes mellom enheter.
  */
 
-const VERSION = "2.2.0";
+const VERSION = "2.10.2";
 // Alle faste kanaler ligger i MA sitt radiobibliotek (builtin/add_radio) med navn + logo, nøklet på st.url.
 // MA slår opp URL-en der, så TV-en viser riktig navn og logo. Nye faste kanaler må legges inn i MA på samme måte.
 // Søketreff spilles via Radio Browser-kilden i MA, som har egne navn + logoer.
@@ -89,6 +89,23 @@ const STATIONS = [
 
 const USER_DATA_KEY = "radio_norge_card";
 
+// Musikkilder i Music Assistant: [nøkkel, navn, farge]. Nøkkelen er første del av MA-URI-en
+// («ytmusic--abc://track/…» -> ytmusic). Tom nøkkel = alle kilder.
+const MUSIC_SOURCES = [
+  ["", "Alle kilder", "#e03131"],
+  ["ytmusic", "YouTube Music", "#e03131"],
+  ["spotify", "Spotify", "#1db954"],
+  ["apple_music", "Apple Music", "#fa2d48"],
+  ["tidal", "Tidal", "#3b5bdb"],
+  ["deezer", "Deezer", "#a238ff"],
+  ["qobuz", "Qobuz", "#4263eb"],
+  ["soundcloud", "SoundCloud", "#ff5500"],
+];
+// pilene som flytter en fane mot venstre/høyre (i redigeringslinja)
+const TAB_MOVE = `<button class="mv" data-d="-1" title="Flytt fanen mot venstre"><ha-icon icon="mdi:arrow-left"></ha-icon></button><button class="mv" data-d="1" title="Flytt fanen mot høyre"><ha-icon icon="mdi:arrow-right"></ha-icon></button>`;
+const musicSrc = (k) => MUSIC_SOURCES.find((s) => s[0] === (k || "")) || MUSIC_SOURCES[0];
+const uriSrc = (uri) => String(uri || "").split("://")[0].split("--")[0];
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const initials = (n) => n.replace(/^(NRK|Radio)\s+/i, "").split(/\s+/).map((w) => w[0]).join("").slice(0, 3).toUpperCase();
 const isoDur = (d) => { const m = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/.exec(d || ""); return m ? (+(m[1] || 0)) * 3600 + (+(m[2] || 0)) * 60 + (+(m[3] || 0)) : 0; };
@@ -119,6 +136,9 @@ class RadioNorgeCard extends HTMLElement {
       ma_only: false,
       // (overgang) todo-liste med kategorier fra en eldre versjon som hver bruker henter sine egne fra én gang
       import_categories_from: null,
+      // fullmodus: sekunder uten berøring før faner og kanaler skjules mens noe spilles (0 = av).
+      // Admin kan overstyre for alle og per bruker under Innstillinger.
+      idle_timeout: 20,
       ...config,
     };
     this._player = this._config.default_player;
@@ -155,15 +175,16 @@ class RadioNorgeCard extends HTMLElement {
   connectedCallback() {
     this._timer = setInterval(() => this._poll(), 15000);
     this._tick = setInterval(() => this._renderProgress(), 1000);
+    if (this._el && this._loaded) this._wake();
   }
-  disconnectedCallback() { clearInterval(this._timer); clearInterval(this._tick); clearTimeout(this._playT); clearTimeout(this._watchT); }
+  disconnectedCallback() { clearTimeout(this._idleT); clearInterval(this._timer); clearInterval(this._tick); clearTimeout(this._playT); clearTimeout(this._watchT); }
 
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
     if (first) { this._build(); this._loadUserData(); }
     const p = hass.states[this._active];
-    const sig = p ? `${p.state}|${p.attributes.media_content_id}|${p.attributes.media_title}|${p.attributes.media_artist}|${p.attributes.entity_picture}|${p.attributes.volume_level}` : "";
+    const sig = p ? `${p.state}|${p.attributes.media_content_id}|${p.attributes.media_title}|${p.attributes.media_artist}|${p.attributes.entity_picture}|${p.attributes.volume_level}|${p.attributes.shuffle}` : "";
     const st = this._current && this._current.bauer ? hass.states[this._config.bauer_sensor_prefix + this._current.bauer] : null;
     const twin = this._twin(this._player);
     // status + kanal på alle kjente spillere, slik at kortet følger med når noe startes fra en annen enhet
@@ -194,6 +215,17 @@ class RadioNorgeCard extends HTMLElement {
     } catch (e) { /* bruker standard */ }
     if (!Array.isArray(this._data.cats)) this._data.cats = []; // egne kategorier: [{ id, name, ids: [] }]
     if (!this._data.favs.length && this._data.cats.length) this._tab = "cat:" + this._data.cats[0].id;
+    // 2.4–2.6 hadde egne musikkategorier (kind: "music") med innholdet i cat.items. Nå er Musikk en fast fane
+    // (som Radio), og en kategori kan inneholde både radio og musikk: flytt innholdet over til vanlige kategorier.
+    this._data.custom = this._data.custom || {};
+    this._data.cats = this._data.cats.filter((c) => !(c.kind === "music" && c.id === "music" && !(c.items || []).length));
+    for (const c of this._data.cats) if (c.kind === "music") {
+      for (const it of c.items || []) this._data.custom[it.id] = it;
+      c.ids = (c.items || []).map((it) => it.id);
+      if (c.name === "Musikk") c.name = "Min musikk";
+      delete c.kind; delete c.src; delete c.items;
+    }
+    delete this._data.musicInit;
     await this._loadSystemData();
     this._pickStartPlayer();
     this._loaded = true;
@@ -202,6 +234,33 @@ class RadioNorgeCard extends HTMLElement {
     this._renderStrip();
     this._renderTabs();
     this._updateNowPlaying();
+    this._wake();
+  }
+
+  /* ---------- fullmodus: skjul faner og kanaler når kortet ikke er rørt på en stund ---------- */
+  // Tid: brukerens egen (Innstillinger) -> standard for alle (Innstillinger) -> idle_timeout i kortoppsettet
+  get _idleSecs() {
+    const pol = this._policy(this._hass.user && this._hass.user.id);
+    const v = pol && pol.idle != null ? pol.idle : this._sys && this._sys.idle != null ? this._sys.idle : this._config.idle_timeout;
+    return Math.max(0, +v || 0);
+  }
+  // all berøring: vis alt igjen og start nedtellingen på nytt
+  _wake() {
+    if (!this._el || !this._hass) return;
+    this._el.card.classList.remove("idle");
+    clearTimeout(this._idleT);
+    const s = this._idleSecs;
+    if (s > 0 && this.isConnected) this._idleT = setTimeout(() => this._goIdle(), s * 1000);
+  }
+  _goIdle() {
+    const el = this._el, p = this._hass.states[this._active];
+    const playing = !!p && (p.state === "playing" || p.state === "buffering");
+    const focus = this.shadowRoot.activeElement;
+    // ikke mens brukeren holder på med noe (meny, innstillinger, redigering, søk), og bare når noe spilles
+    const busy = !el.settings.classList.contains("hidden") || !el.menu.classList.contains("hidden") || this._editCat || this._editFavs || this._addTarget
+      || (focus && (focus.tagName === "INPUT" || focus.tagName === "SELECT"));
+    if (!playing || busy) { this._wake(); return; }
+    el.card.classList.add("idle");
   }
   _saveUserData() {
     this._hass.callWS({ type: "frontend/set_user_data", key: USER_DATA_KEY, value: this._data }).catch(() => {});
@@ -269,17 +328,30 @@ class RadioNorgeCard extends HTMLElement {
     const defName = (outs.find((o) => o.id === this._defPlayer) || {}).name || this._defPlayer;
     this._sys = this._sys || {};
     this._sys.users = this._sys.users || {};
+    const IDLE = [[0, "Av"], [10, "10 sekunder"], [20, "20 sekunder"], [30, "30 sekunder"], [60, "1 minutt"], [120, "2 minutter"], [300, "5 minutter"]];
+    const idleOpts = (val, withDefault) => {
+      const list = IDLE.slice();
+      if (val != null && !list.some(([s]) => s === +val)) list.push([+val, `${+val} sekunder`]);
+      return (withDefault ? `<option value="" ${val == null ? "selected" : ""}>Som standard</option>` : "")
+        + list.map(([s, n]) => `<option value="${s}" ${val != null && +val === s ? "selected" : ""}>${n}</option>`).join("");
+    };
     const render = () => {
-      el.innerHTML = `<div class="sethead"><b>Utganger per bruker</b><button class="close">Ferdig</button></div>
+      el.innerHTML = `<div class="sethead"><b>Innstillinger</b><button class="close">Ferdig</button></div>
+        <div class="setglob"><div class="setname">Fullmodus</div>
+          <p class="sethint">Skjuler faner og kanaler når kortet ikke er rørt på en stund mens noe spilles. Et trykk henter dem tilbake. Kan også settes for hver bruker under.</p>
+          <label class="setdef">Standard for alle: <select class="idleall">${idleOpts(this._sys.idle != null ? this._sys.idle : this._config.idle_timeout, false)}</select></label></div>
+        <div class="setname sethd">Utganger per bruker</div>
         <p class="sethint">Trykk på utgangene en bruker skal få bruke. Administratorer ser alltid alle. ${this._config.restrict_outputs ? `Har en bruker ingen valgt, får den bare «${esc(defName)}».` : "Har en bruker ingen valgt, ser den alle utganger."}</p>
         ${persons.map((p) => {
           const pol = this._sys.users[p.uid] || {}, al = pol.allowed || [];
           return `<div class="setuser" data-uid="${esc(p.uid)}"><div class="setname">${esc(p.name)}</div>
             <div class="setouts">${outs.map((o) => `<button data-out="${esc(o.id)}" class="${al.includes(o.id) ? "on" : ""}">${esc(o.name)}</button>`).join("")}</div>
-            ${al.length > 1 ? `<label class="setdef">Standard: <select>${al.map((id) => `<option value="${esc(id)}" ${pol.default === id ? "selected" : ""}>${esc((outs.find((o) => o.id === id) || {}).name || id)}</option>`).join("")}</select></label>` : ""}
+            ${al.length > 1 ? `<label class="setdef">Standard: <select class="defout">${al.map((id) => `<option value="${esc(id)}" ${pol.default === id ? "selected" : ""}>${esc((outs.find((o) => o.id === id) || {}).name || id)}</option>`).join("")}</select></label>` : ""}
+            <label class="setdef">Fullmodus: <select class="idle">${idleOpts(pol.idle, true)}</select></label>
           </div>`;
         }).join("")}`;
-      el.querySelector(".close").addEventListener("click", () => el.classList.add("hidden"));
+      el.querySelector(".close").addEventListener("click", () => { el.classList.add("hidden"); this._wake(); });
+      el.querySelector("select.idleall").addEventListener("change", (e) => { this._sys.idle = +e.target.value; this._saveSystemData(); });
       el.querySelectorAll(".setuser").forEach((row) => {
         const uid = row.dataset.uid;
         const pol = () => (this._sys.users[uid] = this._sys.users[uid] || { allowed: [] });
@@ -289,7 +361,9 @@ class RadioNorgeCard extends HTMLElement {
           if (!p.allowed.includes(p.default)) p.default = p.allowed[0];
           this._saveSystemData(); render();
         }));
-        const sel = row.querySelector("select");
+        const isel = row.querySelector("select.idle");
+        isel.addEventListener("change", () => { const p = pol(); if (isel.value === "") delete p.idle; else p.idle = +isel.value; this._saveSystemData(); });
+        const sel = row.querySelector("select.defout");
         if (sel) sel.addEventListener("change", () => { pol().default = sel.value; this._saveSystemData(); });
       });
     };
@@ -328,7 +402,7 @@ class RadioNorgeCard extends HTMLElement {
   }
   _newCat() {
     const id = Date.now().toString(36);
-    const cat = { id, name: "Ny kategori", ids: [] };
+    const cat = { id, name: "Ny kategori", ids: [] }; // kan inneholde både radiokanaler og musikk
     this._data.cats.push(cat);
     this._tab = "cat:" + id;
     this._editFavs = false;
@@ -349,33 +423,81 @@ class RadioNorgeCard extends HTMLElement {
     this._renderStrip();
   }
   _addCat() { return this._addTarget ? (this._data.cats || []).find((c) => c.id === this._addTarget) || null : null; }
+  /* ---------- rekkefølgen på fanene (lagres per bruker i data.tabs) ---------- */
+  _tabOrder() {
+    const keys = ["fav", ...(this._data.cats || []).map((c) => "cat:" + c.id), "music", "search"];
+    const saved = (this._data.tabs || []).filter((k) => keys.includes(k));
+    if (!saved.length) return keys;
+    // faner som ikke er i den lagrede rekkefølgen (nye kategorier): foran Radio når den står sist, ellers sist
+    for (const k of keys) if (!saved.includes(k)) {
+      if (k === "fav") saved.unshift(k);
+      else if (k !== "search") { let i = saved.length; while (i > 0 && (saved[i - 1] === "search" || (k !== "music" && saved[i - 1] === "music"))) i--; saved.splice(i, 0, k); }
+      else saved.push(k);
+    }
+    return saved;
+  }
+  _moveTab(dir) {
+    const o = this._tabOrder(), i = o.indexOf(this._tab), j = i + dir;
+    if (i < 0 || j < 0 || j >= o.length) return;
+    [o[i], o[j]] = [o[j], o[i]];
+    this._data.tabs = o;
+    this._saveUserData();
+    this._renderTabs();
+    const sel = this._el.tabs.querySelector("button.sel[data-k]");
+    if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  _wireTabMove(bar) {
+    bar.querySelectorAll(".mv").forEach((b) => b.addEventListener("click", () => {
+      const inp = bar.querySelector("input");
+      if (inp) inp.dispatchEvent(new Event("change")); // ta med et navn som er under endring
+      this._moveTab(+b.dataset.d);
+    }));
+  }
+
   _renderCatBar() {
     const bar = this._el.catbar, cat = this._cat();
-    // søk for å legge til i en kategori: vis hvilken, og en Ferdig-knapp tilbake
-    const addCat = this._tab === "search" ? this._addCat() : null;
+    // søk (Radio eller Musikk) for å legge til i en kategori: vis hvilken, og en Ferdig-knapp tilbake
+    const addCat = this._tab === "search" || this._tab === "music" ? this._addCat() : null;
     if (addCat) {
       bar.classList.remove("hidden");
-      bar.innerHTML = `<ha-icon icon="mdi:playlist-plus"></ha-icon><span class="addhint">Legger til i «${esc(addCat.name)}» – trykk ⊕ på kanalene</span><button class="done">Ferdig</button>`;
+      bar.innerHTML = `<ha-icon icon="mdi:playlist-plus"></ha-icon><span class="addhint">Legger til i «${esc(addCat.name)}» – trykk ⊕ på det du vil ha med</span><button class="done">Ferdig</button>`;
       bar.querySelector(".done").addEventListener("click", () => {
         this._tab = "cat:" + addCat.id; this._addTarget = null;
         this._renderTabs(); this._renderStrip();
       });
       return;
     }
+    // Favoritter og Radio har ingen innstillinger, men fanen kan flyttes som de andre
+    if ((this._tab === "fav" && this._editFavs) || ((this._tab === "search" || this._tab === "music") && this._editCat)) {
+      bar.classList.remove("hidden");
+      bar.innerHTML = `<ha-icon icon="mdi:swap-horizontal"></ha-icon><span class="addhint">${this._tab === "fav" ? "Flytt innholdet med pilene på flisene. Flytt fanen:" : "Flytt fanen:"}</span>${TAB_MOVE}<button class="done">Ferdig</button>`;
+      this._wireTabMove(bar);
+      bar.querySelector(".done").addEventListener("click", () => { this._editFavs = false; this._editCat = false; this._renderTabs(); this._renderStrip(); });
+      return;
+    }
     bar.classList.toggle("hidden", !(this._editCat && cat));
     if (!(this._editCat && cat)) return;
     bar.innerHTML = `<ha-icon icon="mdi:tag-outline"></ha-icon>
       <input type="text" maxlength="30" value="${esc(cat.name)}" placeholder="Navn på kategori" autocomplete="off" enterkeyhint="done">
-      <button class="del">Slett</button><button class="done">Ferdig</button>`;
+      ${TAB_MOVE}<button class="del">Slett</button><button class="done">Ferdig</button>`;
     const inp = bar.querySelector("input");
+    // bytt teksten på fanen uten å miste ikonet
+    const setTab = (txt) => {
+      const tab = this._el.tabs.querySelector(`button[data-k="cat:${cat.id}"]`);
+      if (!tab) return;
+      const ic = tab.querySelector("ha-icon");
+      tab.textContent = txt;
+      if (ic) tab.prepend(ic);
+    };
+    this._wireTabMove(bar);
     const rename = () => {
       const n = inp.value.trim();
       const c = this._cat() || cat;
       if (n && n !== c.name) { c.name = n; this._persistCat(c); }
       const tab = this._el.tabs.querySelector(`button[data-k="cat:${cat.id}"]`);
-      if (tab) tab.textContent = cat.name;
+      if (tab) setTab(c.name);
     };
-    inp.addEventListener("input", () => { const tab = this._el.tabs.querySelector(`button[data-k="cat:${cat.id}"]`); if (tab) tab.textContent = inp.value || "…"; });
+    inp.addEventListener("input", () => { const tab = this._el.tabs.querySelector(`button[data-k="cat:${cat.id}"]`); if (tab) setTab(inp.value || "…"); });
     inp.addEventListener("change", rename);
     inp.addEventListener("blur", rename);
     for (const ev of ["keydown", "keyup", "keypress"]) inp.addEventListener(ev, (e) => { e.stopPropagation(); if (ev === "keydown" && e.key === "Enter") inp.blur(); });
@@ -457,8 +579,16 @@ class RadioNorgeCard extends HTMLElement {
     for (const e of [id, this._twin(id)]) {
       const p = e && this._hass.states[e];
       if (!p || (p.state !== "playing" && p.state !== "buffering")) continue;
-      const st = this._matchStation(p.attributes.media_content_id) || this._adhocStation(p);
+      const st = this._matchStation(p.attributes.media_content_id) || this._adhocStation(p) || this._musicStation(p);
       if (st) return st;
+    }
+    // Noe annet spiller rett på utgangen, f.eks. kastet fra Spotify- eller YouTube Music-appen på en telefon:
+    // vis det også (cover, tittel, artist). Det styres fra appen; kortet viser bare.
+    const p = this._hass.states[id], a = p && p.attributes;
+    if (p && p.state === "playing" && !a.mass_player_type && a.app_name !== "Music Assistant" && (a.media_title || a.entity_picture)) {
+      const app = a.app_name || "Avspilling";
+      this._ext = this._ext || {};
+      return (this._ext[app] = this._ext[app] || { id: "ext_" + app, ext: true, music: true, name: app, group: "music", logo: "", url: "", color: "#5c7cfa", tag: "" });
     }
     return null;
   }
@@ -468,7 +598,9 @@ class RadioNorgeCard extends HTMLElement {
     if (this._busy || this._want || Date.now() - (this._localPlayAt || 0) < 20000) return; // midt i et bytte
     let st = this._playingOn(this._player);
     // valgt utgang er stille, men en annen spiller: bytt dit (med mindre brukeren nettopp valgte utgang selv)
-    if (!st && Date.now() - (this._userPickedAt || 0) > 60000) {
+    // Bare for brukere som aldri har valgt utgang selv: ellers hopper kortet til f.eks. badet som alltid
+    // spiller, og neste trykk bytter kanal eller stopper der.
+    if (!st && !this._data.player && Date.now() - (this._userPickedAt || 0) > 60000) {
       const twins = new Set(Object.values(this._maMap));
       for (const id of this._watchIds().filter((i) => !twins.has(i) && this._allowed(i))) {
         const s = this._playingOn(id);
@@ -491,7 +623,7 @@ class RadioNorgeCard extends HTMLElement {
     this._actState = state;
     if (was !== "playing" || state === "playing" || state === "buffering") return;
     const st = this._current;
-    if (!st || !this._localPlayAt || this._userStopped || this._busy || this._want) return;
+    if (!st || st.music || !this._localPlayAt || this._userStopped || this._busy || this._want) return;
     if (document.visibilityState !== "visible") return; // ikke start noe i bakgrunnen (f.eks. etter "Hey Google, stopp")
     if (Date.now() - this._localPlayAt < 15000) return; // vanlig kanalbytte (idle et lite øyeblikk)
     clearTimeout(this._dropT);
@@ -537,6 +669,7 @@ class RadioNorgeCard extends HTMLElement {
     return { ...(this._config.auto_twins !== false ? this._autoTwins : {}), ...(this._config.ma_players || {}) };
   }
   _route(st, player = this._player) {
+    if (st && st.ext) return { entity: player, ma: false }; // kastet utenfra: selve utgangen spiller, ikke MA-tvillingen
     if (this._isMA(player)) return { entity: player, ma: true };
     const twin = this._twin(player);
     if (twin && st && !(this._config.nrk_direct && st.group === "nrk")) return { entity: twin, ma: true };
@@ -554,6 +687,7 @@ class RadioNorgeCard extends HTMLElement {
     this._userStopped = false;
     this._current = st;
     this._data.last = st.id;
+    clearTimeout(this._startT); this._startT = setTimeout(() => this._updateNowPlaying(), 25500); // «Starter…» av igjen
     if (!STATIONS.find((s) => s.id === st.id)) this._data.custom[st.id] = st;
     this._np = {};
     this._updateNowPlaying();
@@ -563,15 +697,15 @@ class RadioNorgeCard extends HTMLElement {
     this._playT = setTimeout(() => this._flushPlay(), 300);
   }
   async _flushPlay() {
-    if (this._busy) return; // kjører allerede – _want plukkes opp når den er ferdig
+    // siste valg sendes med en gang, også om forrige kall ikke har svart ennå (MA bruker 5–10 s på en Cast)
+    const gen = (this._playGen = (this._playGen || 0) + 1);
     const st = this._want;
     if (!st) return;
     this._want = null;
     this._busy = true;
     this._saveUserData();
     await this._send(st, 0);
-    this._busy = false;
-    if (this._want) this._flushPlay();
+    if (gen === this._playGen) this._busy = false;
   }
   async _send(st, attempt) {
     const r = this._route(st);
@@ -579,7 +713,8 @@ class RadioNorgeCard extends HTMLElement {
     this._lastRoute = r;
     try {
       // bare ved bytte mellom Cast og MA på samme høyttaler (nrk_direct) – ellers erstatter MA køen selv
-      if (prev && prev.entity !== r.entity && this._hass.states[prev.entity]?.state === "playing") {
+      // prev kan være en helt annen høyttaler (forrige utgang) – den skal aldri stoppes herfra
+      if (prev && prev.entity !== r.entity && (prev.entity === this._player || prev.entity === this._twin(this._player)) && this._hass.states[prev.entity]?.state === "playing") {
         await this._hass.callService("media_player", "media_stop", {}, { entity_id: prev.entity });
       }
       if (r.ma) {
@@ -603,10 +738,10 @@ class RadioNorgeCard extends HTMLElement {
       }
     } catch (e) {
       if (attempt === 0 && this._current === st) { await new Promise((ok) => setTimeout(ok, 1500)); return this._send(st, 1); }
-      this._toast(`Kunne ikke spille: ${e.message || e}`);
+      if (this._current === st) this._toast(`Kunne ikke spille: ${e.message || e}`);
       return;
     }
-    this._watch(st, r.entity, attempt);
+    if (this._current === st) this._watch(st, r.entity, attempt);
   }
   // vakthund: kom ikke kanalen i gang innen 25 s, prøv én gang til (MA bruker iblant 15–20 s på en kald Cast)
   _watch(st, entity, attempt) {
@@ -649,6 +784,7 @@ class RadioNorgeCard extends HTMLElement {
   _resolveNp() {
     const st = this._current;
     if (!st) return {};
+    if (st.music) return this._musicNp();
     if (st.nrk) return this._np;
     if (st.bauer) {
       const s = this._hass.states[this._config.bauer_sensor_prefix + st.bauer];
@@ -669,18 +805,22 @@ class RadioNorgeCard extends HTMLElement {
     return {};
   }
 
+  // svar: false = søket pågår, null = ingen treff, ellers adressen til coveret
   _lookupArt(artist, title) {
     const key = `${artist}|${title}`;
     if (this._art.has(key)) return this._art.get(key);
-    this._art.set(key, null);
+    this._art.set(key, false);
     const term = encodeURIComponent(`${artist} ${title}`.replace(/\(.*?\)|feat\..*|ft\..*/gi, ""));
-    fetch(`https://itunes.apple.com/search?term=${term}&entity=song&limit=1&country=no`)
+    const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 5000);
+    fetch(`https://itunes.apple.com/search?term=${term}&entity=song&limit=1&country=no`, { signal: ctl.signal })
       .then((r) => r.json())
       .then((j) => {
         const u = j.results && j.results[0] && j.results[0].artworkUrl100;
-        if (u) { this._art.set(key, u.replace("100x100bb", "800x800bb")); this._updateNowPlaying(); }
-      }).catch(() => {});
-    return null;
+        this._art.set(key, u ? u.replace("100x100bb", "800x800bb") : null);
+      })
+      .catch(() => { this._art.set(key, null); })
+      .finally(() => { clearTimeout(to); this._updateNowPlaying(); });
+    return false;
   }
 
   /* ---------- UI ---------- */
@@ -697,18 +837,21 @@ class RadioNorgeCard extends HTMLElement {
         </div>
         <div class="stage">
           <div class="artwrap">
-            <div class="art"><img class="artimg" alt=""><div class="artlogo"></div></div>
+            <div class="art"><img class="artimg" alt=""><img class="artimg" alt=""><div class="artlogo"></div></div>
             <div class="badge"><img alt=""><span></span></div>
           </div>
           <div class="info">
-            <div class="live"><span class="dot"></span> DIREKTE <span class="stname"></span></div>
+            <div class="live"><span class="dot"></span> <span class="livetxt">DIREKTE</span> <span class="stname"></span></div>
             <div class="title"></div>
             <div class="artist"></div>
             <div class="program"></div>
             <div class="progress"><div></div></div>
             <div class="history"></div>
             <div class="controls">
+              <button class="round prev hidden" title="Forrige"><ha-icon icon="mdi:skip-previous"></ha-icon></button>
               <button class="play" title="Spill / stopp"><ha-icon icon="mdi:play"></ha-icon></button>
+              <button class="round next hidden" title="Neste"><ha-icon icon="mdi:skip-next"></ha-icon></button>
+              <button class="round shuf hidden" title="Tilfeldig rekkefølge"><ha-icon icon="mdi:shuffle-variant"></ha-icon></button>
               <button class="round fav" title="Favoritt"><ha-icon icon="mdi:star-outline"></ha-icon></button>
               <div class="vol"><ha-icon icon="mdi:volume-high"></ha-icon><input type="range" min="0" max="100" step="1"></div>
             </div>
@@ -725,30 +868,41 @@ class RadioNorgeCard extends HTMLElement {
       </ha-card>`;
     const $ = (s) => root.querySelector(s);
     this._el = {
-      card: $("ha-card"), bgimg: $(".bgimg"), outname: $(".outname"), menu: $(".menu"), art: $(".artimg"), artlogo: $(".artlogo"),
+      card: $("ha-card"), bgimg: $(".bgimg"), outname: $(".outname"), menu: $(".menu"), arts: [...root.querySelectorAll(".artimg")], artlogo: $(".artlogo"),
       badge: $(".badge"), stname: $(".stname"), title: $(".title"), artist: $(".artist"), program: $(".program"),
       progress: $(".progress"), bar: $(".progress div"), history: $(".history"), play: $(".play"), fav: $(".fav"),
-      vol: $(".vol input"), tabs: $(".tabs"), strip: $(".strip"), search: $(".searchbar"), searchIn: $(".searchbar input"), catbar: $(".catbar"), settings: $(".settings"), toast: $(".toast"), live: $(".live"),
+      vol: $(".vol input"), tabs: $(".tabs"), strip: $(".strip"), search: $(".searchbar"), searchIn: $(".searchbar input"), catbar: $(".catbar"), settings: $(".settings"), toast: $(".toast"), live: $(".live"), livetxt: $(".livetxt"), prev: $(".prev"), next: $(".next"), shuf: $(".shuf"),
     };
     $(".out").addEventListener("click", (e) => { e.stopPropagation(); this._toggleMenu(); });
     root.addEventListener("click", () => this._el.menu.classList.add("hidden"));
+    for (const ev of ["pointerdown", "keydown", "wheel"]) root.addEventListener(ev, () => this._wake(), { capture: true, passive: true });
     this._el.play.addEventListener("click", () => {
       const p = this._hass.states[this._active];
-      if (p && p.state === "playing") this._stop();
+      if (this._current && this._current.music) this._musicToggle(p);
+      else if (p && p.state === "playing") this._stop();
       else if (this._current) this._play(this._current);
       else if (this._pendingLast) this._play(this._pendingLast);
     });
     this._el.fav.addEventListener("click", () => this._current && this._toggleFav(this._current));
+    this._el.prev.addEventListener("click", () => this._musicSkip(-1));
+    this._el.next.addEventListener("click", () => this._musicSkip(1));
+    this._el.shuf.addEventListener("click", () => {
+      if (!this._current || !this._current.music) return;
+      const ent = this._active, on = !!this._hass.states[ent]?.attributes.shuffle;
+      this._el.shuf.classList.toggle("on", !on); // vis valget med en gang, spilleren bekrefter like etter
+      this._hass.callService("media_player", "shuffle_set", { shuffle: !on }, { entity_id: ent }).catch((e) => this._toast(`Kunne ikke endre tilfeldig rekkefølge: ${e.message || e}`));
+      // køen stokkes om: hent «Kommer» på nytt
+      setTimeout(() => { this._upNextKey = null; this._updateNowPlaying(); }, 1500);
+    });
     this._el.vol.addEventListener("change", (e) => this._volume(e.target.value / 100));
     this._el.vol.addEventListener("input", () => { this._volDrag = Date.now(); });
     let t;
     const si = this._el.searchIn;
-    const go = (delay) => { clearTimeout(t); t = setTimeout(() => this._search(si.value), delay); };
+    const go = (delay) => { clearTimeout(t); t = setTimeout(() => (this._tab === "music" ? this._musicSearch(si.value) : this._search(si.value)), delay); };
     si.addEventListener("input", () => go(350));
     si.addEventListener("search", () => go(0)); // Enter / tøm-kryss
     // ikke la HA sine hurtigtaster (e, c, a, m …) eller visningen stjele tastetrykk
     for (const ev of ["keydown", "keyup", "keypress"]) si.addEventListener(ev, (e) => { e.stopPropagation(); if (ev === "keydown" && e.key === "Enter") go(0); });
-    this._el.art.addEventListener("error", () => { this._el.art.removeAttribute("src"); this._el.art.classList.remove("show"); });
     this._renderTabs();
   }
 
@@ -759,7 +913,7 @@ class RadioNorgeCard extends HTMLElement {
         <ha-icon icon="${p.id === this._defPlayer ? "mdi:home-sound-out" : p.tv ? "mdi:television" : "mdi:speaker"}"></ha-icon>
         <span>${esc(p.name)}</span>${p.state === "playing" ? '<ha-icon class="eqi" icon="mdi:equalizer"></ha-icon>' : ""}
       </button>`).join("")
-      + (this._isAdmin ? `<button class="admin"><ha-icon icon="mdi:account-cog"></ha-icon><span>Utganger per bruker…</span></button>` : "");
+      + (this._isAdmin ? `<button class="admin"><ha-icon icon="mdi:cog"></ha-icon><span>Innstillinger…</span></button>` : "");
     const adm = m.querySelector(".admin");
     if (adm) adm.addEventListener("click", (e) => { e.stopPropagation(); m.classList.add("hidden"); this._openSettings(); });
     m.querySelectorAll("button[data-id]").forEach((b) => b.addEventListener("click", (e) => {
@@ -775,7 +929,13 @@ class RadioNorgeCard extends HTMLElement {
       const ps = this._hass.states[prev];
       const already = this._playingOn(this._player);
       if (already) { this._current = already; this._np = {}; this._lastRoute = this._route(already); this._poll(); } // den nye utgangen spiller allerede – vis den kanalen
-      else if (prev !== this._active && this._current && ps && ps.state === "playing") { this._stop(prev); this._play(this._current); }
+      else {
+        // Den nye utgangen er stille. Forrige utgang røres ikke (den kan være noens faste radio):
+        // kortet viser «Sist: …», og ▶ starter samme kanal på den nye utgangen.
+        if (this._current && !this._current.music) this._data.last = this._current.id;
+        this._current = null; this._lastRoute = null;
+        this._saveUserData();
+      }
       this._sig = null;
       this.hass = this._hass;
       this._renderStrip();
@@ -785,27 +945,33 @@ class RadioNorgeCard extends HTMLElement {
 
   _renderTabs() {
     const cats = this._data.cats || [];
-    if (!["fav", "search"].includes(this._tab) && !this._cat()) { this._tab = "fav"; this._editCat = false; }
-    const tabs = [["fav", "Favoritter"], ...cats.map((c) => ["cat:" + c.id, c.name]), ["search", "Søk"]];
+    if (!["fav", "search", "music"].includes(this._tab) && !this._cat()) { this._tab = "fav"; this._editCat = false; }
+    const defs = new Map([["fav", ["fav", "Favoritter"]], ...cats.map((c) => ["cat:" + c.id, ["cat:" + c.id, c.name]]), ["music", ["music", "Musikk", true]], ["search", ["search", "Radio"]]]);
+    const tabs = this._tabOrder().map((k) => defs.get(k));
     const isFav = this._tab === "fav", isCat = !!this._cat();
     const editing = isFav ? this._editFavs : this._editCat;
-    this._el.tabs.innerHTML = tabs.map(([k, n]) => `<button data-k="${esc(k)}" class="${k === this._tab ? "sel" : ""}">${k === "fav" ? '<ha-icon icon="mdi:star"></ha-icon>' : ""}${esc(n)}</button>`).join("")
+    this._el.tabs.innerHTML = tabs.map(([k, n, m]) => `<button data-k="${esc(k)}" class="${k === this._tab ? "sel" : ""}">${k === "fav" ? '<ha-icon icon="mdi:star"></ha-icon>' : m ? '<ha-icon class="mus" icon="mdi:music"></ha-icon>' : k === "search" ? '<ha-icon class="mus" icon="mdi:radio"></ha-icon>' : ""}${esc(n)}</button>`).join("")
       // før brukeren har laget sin første kategori vises en tydelig «Lag kategori»-knapp, deretter bare +
       + (cats.length
         ? `<button class="add" title="Ny kategori"><ha-icon icon="mdi:plus"></ha-icon></button>`
         : `<button class="add first" title="Lag din egen kategori"><ha-icon icon="mdi:plus"></ha-icon>Lag kategori</button>`)
-      + `<button class="edit ${isFav || isCat ? "" : "hidden"} ${editing ? "sel" : ""}" title="${isFav ? "Endre rekkefølge" : "Rediger kategori"}"><ha-icon icon="${isFav ? "mdi:swap-horizontal" : "mdi:pencil"}"></ha-icon></button>`;
+      + `<button class="edit ${(this._tab === "search" || this._tab === "music") && this._addCat() ? "hidden" : ""} ${editing ? "sel" : ""}" title="${isFav || !isCat ? "Endre rekkefølge" : "Rediger kategori"}"><ha-icon icon="${isFav || !isCat ? "mdi:swap-horizontal" : "mdi:pencil"}"></ha-icon></button>`;
     this._el.tabs.querySelectorAll("button[data-k]").forEach((b) => b.addEventListener("click", () => {
       this._tab = b.dataset.k; this._editFavs = false; this._editCat = false; this._addTarget = null;
       this._renderTabs(); this._renderStrip();
       if (this._tab === "search") setTimeout(() => this._el.searchIn.focus(), 50);
+      // musikkategorier henter innholdet sitt selv (se _renderMusicStrip)
     }));
     this._el.tabs.querySelector(".add").addEventListener("click", () => this._newCat());
     this._el.tabs.querySelector(".edit").addEventListener("click", () => {
       if (this._tab === "fav") this._editFavs = !this._editFavs; else this._editCat = !this._editCat;
       this._renderTabs(); this._renderStrip();
     });
-    this._el.search.classList.toggle("hidden", this._tab !== "search");
+    const mus = this._tab === "music";
+    this._el.search.classList.toggle("hidden", this._tab !== "search" && !mus);
+    const sIn = this._el.searchIn, wantQ = mus ? (this._musicQ || "") : this._searchQ;
+    sIn.placeholder = mus ? "Søk etter musikk – sanger, artister, album og spillelister…" : "Søk i radiokanaler fra hele verden – f.eks. P4, jazz, BBC…";
+    if (sIn.value.trim() !== wantQ) sIn.value = wantQ;
     this._renderCatBar();
   }
 
@@ -813,7 +979,8 @@ class RadioNorgeCard extends HTMLElement {
     const favs = this._data.favs.map((id) => this._station(id)).filter(Boolean);
     switch (this._tab) {
       case "fav": return favs;
-      case "search": return this._searchResults;
+      // Radio-fanen: uten søk vises alle kjente kanaler (faste + de brukeren har lagret), med søk treffene
+      case "search": return this._searchQ.length >= 2 ? this._searchResults : this._allStations.filter((s) => !s.music);
       default: {
         const cat = this._cat();
         if (!cat) return favs;
@@ -826,10 +993,11 @@ class RadioNorgeCard extends HTMLElement {
 
   _renderStrip() {
     if (!this._el) return;
+    if (this._tab === "music") { this._renderMusicStrip(); return; }
     const list = this._stripStations();
     const playing = this._hass.states[this._active]?.state === "playing";
     if (!list.length && this._tab !== "fav" && !this._cat()) {
-      const msg = this._tab === "fav" ? "Ingen favoritter ennå – finn kanaler under Søk og trykk ★ for å legge dem til."
+      const msg = this._tab === "fav" ? "Ingen favoritter ennå – finn kanaler under Radio og trykk ★ for å legge dem til."
         : this._cat() ? "Tom kategori – trykk ✎ til høyre for å legge til kanaler."
         : this._tab !== "search" ? "Ingen kanaler."
         : this._searching ? "Søker…"
@@ -845,29 +1013,29 @@ class RadioNorgeCard extends HTMLElement {
     const inCat = (id) => !!badgeCat && badgeCat.ids.includes(id);
     const showMove = (s) => (this._editFavs && this._tab === "fav") || (!!cat && inCat(s.id));
     const viewCat = this._cat();
-    const moreTile = (this._tab === "fav" && !this._editFavs) ? "Søk for flere kanaler" : viewCat ? "Søk for å legge til" : "";
+    const moreTile = (this._tab === "fav" && !this._editFavs) ? ["Finn radiokanaler", "Finn musikk"] : viewCat ? ["Legg til radio", "Legg til musikk"] : null;
     this._el.strip.innerHTML = list.map((s) => `
       <div class="tile ${this._current && this._current.id === s.id ? "active" : ""} ${playing ? "playing" : ""} ${badgeCat ? "adding" : ""} ${inCat(s.id) ? "in" : ""}" data-id="${esc(s.id)}" style="--c:${esc(s.color || "#5c7cfa")}">
         ${badgeCat ? `<button class="chk" title="${inCat(s.id) ? "Fjern fra" : "Legg til i"} ${esc(badgeCat.name)}"><ha-icon icon="${inCat(s.id) ? (cat ? "mdi:close-circle" : "mdi:check-circle") : "mdi:plus-circle"}"></ha-icon></button>` : ""}
-        <div class="logo">${s.logo ? `<img src="${esc(s.logo)}" alt="" loading="lazy">` : `<span>${esc(initials(s.name))}</span>`}
+        <div class="logo ${s.music && s.logo ? "cover" : ""} ${s.kind === "artist" ? "circle" : ""}">${s.logo ? `<img src="${esc(s.logo)}" alt="" loading="lazy">` : `<span>${esc(initials(s.name))}</span>`}
           <div class="eq"><i></i><i></i><i></i></div></div>
-        <div class="tname">${esc(s.name)}</div>
+        <div class="tname">${esc(s.name)}</div>${s.music ? `<div class="tsub">${esc(s.tag)}</div>` : ""}
         <button class="star ${this._isFav(s.id) ? "on" : ""}" title="Favoritt"><ha-icon icon="${this._isFav(s.id) ? "mdi:star" : "mdi:star-outline"}"></ha-icon></button>
         ${showMove(s) ? `<div class="move"><button data-d="-1"><ha-icon icon="mdi:chevron-left"></ha-icon></button><button data-d="1"><ha-icon icon="mdi:chevron-right"></ha-icon></button></div>` : ""}
       </div>`).join("")
-      + (moreTile ? `<div class="tile more"><div class="logo more"><ha-icon icon="${viewCat ? "mdi:magnify-plus-outline" : "mdi:magnify"}"></ha-icon></div><div class="tname">${moreTile}</div></div>` : "");
-    const more = this._el.strip.querySelector(".tile.more");
-    if (more) more.addEventListener("click", () => {
+      // sist i raden: snarveier til Radio- og Musikk-fanen (fra en kategori: for å legge til i den)
+      + (moreTile ? moreTile.map((n, i) => `<div class="tile more" data-to="${i ? "music" : "search"}"><div class="logo more"><ha-icon icon="${i ? "mdi:music-note-plus" : "mdi:radio"}"></ha-icon></div><div class="tname">${n}</div></div>`).join("") : "");
+    this._el.strip.querySelectorAll(".tile.more").forEach((more) => more.addEventListener("click", () => {
       this._addTarget = viewCat ? viewCat.id : null;
-      this._tab = "search"; this._editFavs = false; this._editCat = false;
+      this._tab = more.dataset.to; this._editFavs = false; this._editCat = false;
       this._renderTabs(); this._renderStrip();
       setTimeout(() => this._el.searchIn.focus(), 50);
-    });
+    }));
     const byId = new Map(list.map((s) => [s.id, s]));
     this._el.strip.querySelectorAll(".tile[data-id]").forEach((t) => {
       const st = byId.get(t.dataset.id);
       // redigering av kategori: et trykk fjerner kanalen. Ellers spilles den; ⊕/✓ legger til / fjerner.
-      t.addEventListener("click", () => (cat ? this._toggleInCat(cat, st) : this._play(st)));
+      t.addEventListener("click", () => (cat ? this._toggleInCat(cat, st) : st.music ? this._playMusic(st) : this._play(st))); // favoritter kan også være musikk
       const chk = t.querySelector(".chk");
       if (chk) chk.addEventListener("click", (e) => { e.stopPropagation(); this._toggleInCat(badgeCat, st); });
       t.querySelector(".star").addEventListener("click", (e) => { e.stopPropagation(); this._toggleFav(st); });
@@ -897,7 +1065,7 @@ class RadioNorgeCard extends HTMLElement {
     if (q.length < 2) { this._searchResults = []; this._searching = false; this._renderStrip(); return; }
     // 1) egne kanaler – vises med en gang
     const nq = norm(q);
-    const local = this._allStations.filter((s) => norm(`${s.name} ${s.tag || ""}`).includes(nq));
+    const local = this._allStations.filter((s) => !s.music && norm(`${s.name} ${s.tag || ""}`).includes(nq));
     this._searchResults = local;
     this._searching = true;
     this._renderStrip();
@@ -927,6 +1095,233 @@ class RadioNorgeCard extends HTMLElement {
     this._renderStrip();
   }
 
+  /* ---------- musikk via Music Assistant (YouTube Music m.m.) ---------- */
+
+  get _maEntry() {
+    if (this._config.ma_config_entry) return this._config.ma_config_entry;
+    const ents = this._hass.entities || {}, devs = this._hass.devices || {};
+    for (const [eid, e] of Object.entries(ents)) {
+      if (!eid.startsWith("media_player.") || e.platform !== "music_assistant") continue;
+      const d = devs[e.device_id];
+      const ce = d && (d.primary_config_entry || (d.config_entries || [])[0]);
+      if (ce) return ce;
+    }
+    return null;
+  }
+  async _maCall(service, data) {
+    const entry = this._maEntry;
+    if (!entry) throw new Error("fant ikke Music Assistant-integrasjonen");
+    const r = await this._hass.callWS({ type: "call_service", domain: "music_assistant", service, service_data: { config_entry_id: entry, ...data }, return_response: true });
+    return (r && r.response) || {};
+  }
+  _musicItem(i, kind) {
+    const kinds = { track: "Sang", playlist: "Spilleliste", album: "Album", artist: "Artist" };
+    const artist = (i.artists || []).map((a) => a.name).join(", ");
+    return {
+      id: "ma_" + i.uri, uri: i.uri, music: true, kind, name: (i.name || "") + (i.version ? ` (${i.version})` : ""), group: "music",
+      logo: i.image || "", url: "", color: musicSrc(uriSrc(i.uri))[2], tag: [kinds[kind], artist].filter(Boolean).join(" · "),
+    };
+  }
+  // spillelistene i MA-biblioteket (vises i Musikk-fanen når søkefeltet er tomt)
+  async _musicOpen() {
+    if (this._musicLib || this._musicBusy) return;
+    this._musicBusy = true; this._musicErr = ""; this._renderStrip();
+    try {
+      const r = await this._maCall("get_library", { media_type: "playlist", limit: 60 });
+      this._musicLib = (r.items || []).map((i) => this._musicItem(i, "playlist"));
+    } catch (e) { this._musicErr = e.message || String(e); }
+    this._musicBusy = false; this._renderStrip();
+  }
+  async _musicSearch(q) {
+    q = q.trim();
+    this._musicQ = q;
+    const seq = (this._musicSeq = (this._musicSeq || 0) + 1);
+    if (q.length < 2) { this._musicResults = null; this._musicBusy = false; this._musicErr = ""; this._renderStrip(); return; }
+    this._musicBusy = true; this._musicErr = ""; this._renderStrip();
+    let out = [];
+    try {
+      const r = await this._maCall("search", { name: q, media_type: ["track", "playlist", "album", "artist"], limit: 12 });
+      if (seq !== this._musicSeq) return;
+      for (const [key, kind] of [["tracks", "track"], ["playlists", "playlist"], ["albums", "album"], ["artists", "artist"]]) {
+        out = out.concat((r[key] || []).map((i) => this._musicItem(i, kind)));
+      }
+    } catch (e) { if (seq !== this._musicSeq) return; this._musicErr = e.message || String(e); }
+    this._musicResults = out; this._musicBusy = false; this._renderStrip();
+  }
+  _renderMusicStrip() {
+    // Musikk-fanen: uten søk spillelistene i biblioteket, med søk treff fra alle kilder. Et trykk spiller,
+    // ★ gir favoritt. Kommer brukeren fra en kategori («Legg til musikk»), legger ⊕ treffet i den kategorien.
+    const cat = this._addCat();
+    const searching = (this._musicQ || "").length >= 2;
+    if (!searching && !this._musicLib && !this._musicBusy && !this._musicErr) { this._musicOpen(); return; }
+    const isIn = (s) => !!cat && cat.ids.includes(s.id);
+    const list = searching ? (this._musicResults || []) : (this._musicLib || []);
+    const badge = (s) => (!cat ? "" : `<button class="chk" title="${isIn(s) ? "Fjern fra" : "Legg til i"} ${esc(cat.name)}"><ha-icon icon="${isIn(s) ? "mdi:check-circle" : "mdi:plus-circle"}"></ha-icon></button>`);
+    const strip = this._el.strip;
+    if (!list.length) {
+      const msg = this._musicBusy ? "Henter…"
+        : this._musicErr ? "Music Assistant svarte ikke: " + esc(this._musicErr)
+        : searching ? `Ingen treff på «${esc(this._musicQ)}». Får du aldri treff, er trolig musikktjenesten ikke satt opp eller logget ut i Music Assistant.`
+        : "Søk etter sanger, artister, album og spillelister.";
+      strip.innerHTML = `<div class="empty">${msg}</div>`;
+      return;
+    }
+    const playing = this._hass.states[this._active]?.state === "playing";
+    strip.innerHTML = list.map((s) => `
+      <div class="tile ${this._current && this._current.id === s.id ? "active" : ""} ${playing ? "playing" : ""} ${isIn(s) ? "in" : ""}" data-id="${esc(s.id)}" style="--c:${esc(s.color)}">${badge(s)}<button class="star left ${this._isFav(s.id) ? "on" : ""}" title="Favoritt"><ha-icon icon="${this._isFav(s.id) ? "mdi:star" : "mdi:star-outline"}"></ha-icon></button>
+        <div class="logo ${s.logo ? "cover" : ""} ${s.kind === "artist" ? "circle" : ""}">${s.logo ? `<img src="${esc(s.logo)}" alt="" loading="lazy">` : `<span>${esc(initials(s.name))}</span>`}
+          <div class="eq"><i></i><i></i><i></i></div></div>
+        <div class="tname">${esc(s.name)}</div>
+        <div class="tsub">${esc(s.tag)}</div>
+      </div>`).join("");
+    const byId = new Map(list.map((s) => [s.id, s]));
+    strip.querySelectorAll(".tile[data-id]").forEach((t) => {
+      const st = byId.get(t.dataset.id);
+      t.addEventListener("click", () => this._playMusic(st));
+      const chk = t.querySelector(".chk");
+      if (chk) chk.addEventListener("click", (e) => { e.stopPropagation(); this._toggleInCat(cat, st); });
+      t.querySelector(".star").addEventListener("click", (e) => { e.stopPropagation(); this._toggleFav(st); });
+      const img = t.querySelector("img");
+      if (img) img.addEventListener("error", () => { img.parentElement.classList.remove("cover"); img.replaceWith(Object.assign(document.createElement("span"), { textContent: initials(st.name) })); });
+    });
+  }
+  // musikk går alltid via Music Assistant: utgangen selv, eller MA-tvillingen til en Cast-utgang
+  _musicTarget() { return this._isMA(this._player) ? this._player : this._twin(this._player); }
+  async _playMusic(st, startUri) {
+    const entity = this._musicTarget();
+    if (!entity) { this._toast("Denne utgangen kan ikke spille via Music Assistant – velg en annen"); return; }
+    clearTimeout(this._playT); clearTimeout(this._watchT); clearTimeout(this._dropT);
+    this._want = null;
+    this._localPlayAt = Date.now();
+    this._userStopped = false;
+    this._current = st;
+    this._np = {};
+    this._lastRoute = { entity, ma: true };
+    this._upNextKey = null;
+    clearTimeout(this._startT); this._startT = setTimeout(() => this._updateNowPlaying(), 25500);
+    this._updateNowPlaying();
+    try {
+      const data = { media_id: st.uri, media_type: st.kind, enqueue: "replace" };
+      if (st.kind === "track" || st.kind === "artist") data.radio_mode = true; // fortsett med lignende musikk
+      if (startUri) data.start_item = startUri; // hopp rett til et spor i albumet/spillelisten
+      await this._hass.callService("music_assistant", "play_media", data, { entity_id: entity });
+    } catch (e) { this._toast(`Kunne ikke spille: ${e.message || e}`); }
+  }
+  _musicToggle(p) {
+    const st = this._current, ent = this._active;
+    if (p && p.state === "playing") this._hass.callService("media_player", "media_pause", {}, { entity_id: ent });
+    else if (p && p.state === "paused") this._hass.callService("media_player", "media_play", {}, { entity_id: ent });
+    else if (st.uri) this._playMusic(st);
+  }
+  _musicSkip(dir) {
+    if (!this._current || !this._current.music) return;
+    this._hass.callService("media_player", dir > 0 ? "media_next_track" : "media_previous_track", {}, { entity_id: this._active });
+  }
+  // bytte utgang mens musikk spiller: flytt hele køen (beholder posisjonen)
+  _transferMusic(prev) {
+    const target = this._musicTarget();
+    if (!target) { this._toast("Denne utgangen kan ikke spille via Music Assistant"); return; }
+    this._localPlayAt = Date.now();
+    this._hass.callService("music_assistant", "transfer_queue", { source_player: prev, auto_play: true }, { entity_id: target })
+      .catch((e) => this._toast(`Kunne ikke flytte musikken: ${e.message || e}`));
+  }
+  // en MA-spiller som spiller noe annet enn radio (startet herfra eller fra MA selv)
+  _musicStation(p) {
+    const a = p.attributes, cid = a.media_content_id || "";
+    if (!a.mass_player_type || !cid || /:\/\/radio\//.test(cid) || /^https?:/i.test(cid)) return null;
+    if (this._current && this._current.music && !this._current.ext) return this._current;
+    return (this._musicNow = this._musicNow || { id: "ma_now", music: true, name: "Music Assistant", group: "music", logo: "", url: "", color: "#e03131", tag: "" });
+  }
+  // viser vi fortsatt forrige spor mens MA bytter? (da er spilleren et øyeblikk ikke «playing»)
+  _musicHeld() { const h = this._mnp; return !!(h && this._current && this._current.music && h.st === this._current && Date.now() - h.at < 8000); }
+  _musicNp() {
+    const p = this._hass.states[this._active];
+    const st = this._current, now = Date.now();
+    const hold = this._mnp && this._mnp.st === st ? this._mnp : null;
+    const later = (ms) => { clearTimeout(this._mnpT); this._mnpT = setTimeout(() => this._updateNowPlaying(), ms); };
+    // Sporbytte: MA er innom idle/buffering et øyeblikk. Behold forrige visning i stedet for å blinke.
+    if (!p || (p.state !== "playing" && p.state !== "paused")) {
+      if (hold && now - hold.at < 8000) { hold.susSince = 0; later(8100 - (now - hold.at)); return hold.np; }
+      return {};
+    }
+    const a = p.attributes;
+    const image = a.entity_picture || null;
+    // Rett etter et bytte sender MA iblant forrige spors bilde én gang til. Ikke hopp tilbake til det.
+    // Det samme gjelder et tomt bilde. Cast bruker opptil 10 s på å starte neste spor, så tilbakehoppet kan komme
+    // sent: det godtas først når det har vart i 2 s (da har brukeren faktisk gått tilbake til forrige spor).
+    if (hold && image !== hold.np.image && (!image || (image === hold.prevImage && now - hold.changedAt < 20000))) {
+      if (!hold.susSince || hold.susImage !== image) { hold.susImage = image; hold.susSince = now; } // de 2 s gjelder ett og samme bilde, sammenhengende
+      if (now - hold.susSince < 2000) { hold.at = now; later(2100 - (now - hold.susSince)); return hold.np; }
+    }
+    const changed = !!hold && image !== hold.np.image;
+    // image er nøkkelen for coveret. MA gir ofte en lokal http-adresse (192.168…) som bare virker hjemme:
+    // da vises bildet via HA sin bildeproxy (entity_picture_local), som virker overalt der HA virker.
+    const src = image && !/^https:\/\//i.test(image) && a.entity_picture_local ? a.entity_picture_local : image;
+    const np = { title: a.media_title, artist: a.media_artist, image, src, program: a.media_album_name || "" };
+    this._mnp = { st, np, at: now, prevImage: changed ? hold.np.image : hold ? hold.prevImage : null, changedAt: changed ? now : hold ? hold.changedAt : 0 };
+    if (p.state === "playing" && a.media_duration && a.media_position != null && a.media_position_updated_at) {
+      np.dur = a.media_duration;
+      np.start = new Date(a.media_position_updated_at).getTime() - a.media_position * 1000;
+    }
+    return np;
+  }
+
+  /* ---------- «Kommer»: sporene etter det som spiller ---------- */
+  // Album/spillelister: sporlisten leses fra MA (browse_media) én gang. Ellers (artist, radiomodus, tom
+  // liste, shuffle): bare neste spor i køen – MA gir ikke ut mer av køen enn det.
+  _musicUpcoming() {
+    const st = this._current, ent = this._active, p = this._hass.states[ent];
+    if (!st || !st.music || st.ext || !p || (p.state !== "playing" && p.state !== "paused")) return; // køen til en app på telefonen kjenner vi ikke
+    if (this._upListFor !== st.id) {
+      this._upListFor = st.id; this._upList = null;
+      if ((st.kind === "album" || st.kind === "playlist") && st.uri) {
+        this._hass.callWS({ type: "media_player/browse_media", entity_id: ent, media_content_type: st.kind, media_content_id: st.uri })
+          .then((r) => {
+            if (this._upListFor !== st.id) return;
+            this._upList = ((r && r.children) || []).filter((c) => c.media_class === "track").map((c) => ({ uri: c.media_content_id, name: c.title }));
+            this._renderUpcoming();
+          }).catch(() => {});
+      }
+    }
+    const key = ent + "|" + (p.attributes.media_content_id || "");
+    if (this._upNextKey !== key) {
+      this._upNextKey = key; this._upNext = null;
+      this._hass.callWS({ type: "call_service", domain: "music_assistant", service: "get_queue", service_data: {}, target: { entity_id: ent }, return_response: true })
+        .then((r) => {
+          if (this._upNextKey !== key) return;
+          const q = r && r.response && r.response[ent], n = q && q.next_item;
+          this._upNext = n ? { name: n.name, uri: n.media_item && n.media_item.uri } : null;
+          this._upShuffle = !!(q && q.shuffle_enabled);
+          this._renderUpcoming();
+        }).catch(() => {});
+    }
+  }
+  _upcomingList() {
+    const st = this._current, p = this._hass.states[this._active];
+    if (!st || !st.music || !p || (p.state !== "playing" && p.state !== "paused")) return [];
+    const list = this._upListFor === st.id ? this._upList : null, next = this._upNext;
+    if (list && list.length && !this._upShuffle) {
+      let from = next && next.uri ? list.findIndex((t) => t.uri === next.uri) : -1;
+      if (from < 0) { const i = list.findIndex((t) => t.uri === p.attributes.media_content_id); if (i >= 0) from = i + 1; }
+      if (from >= 0 && from < list.length) return list.slice(from, from + 5).map((t, i) => ({ ...t, jump: i > 0 }));
+    }
+    return next ? [{ name: next.name }] : [];
+  }
+  _renderUpcoming() {
+    const st = this._current;
+    if (!this._el || !st || !st.music) return;
+    const up = this._upcomingList();
+    const html = up.length ? `<span>Kommer</span>${up.map((t, i) => `<div class="upi" data-i="${i}" title="Spill nå">${esc(t.name)}</div>`).join("")}` : "";
+    if (html === this._upHtml) return;
+    this._upHtml = html;
+    this._el.history.innerHTML = html;
+    // trykk på et spor: første = neste i køen, resten = start albumet/spillelisten fra det sporet
+    this._el.history.querySelectorAll(".upi").forEach((d) => d.addEventListener("click", () => {
+      const t = up[+d.dataset.i];
+      if (t.jump && t.uri) this._playMusic(st, t.uri); else this._musicSkip(1);
+    }));
+  }
+
   _renderFavButton() {
     const on = this._current && this._isFav(this._current.id);
     this._el.fav.innerHTML = `<ha-icon icon="${on ? "mdi:star" : "mdi:star-outline"}"></ha-icon>`;
@@ -940,24 +1335,35 @@ class RadioNorgeCard extends HTMLElement {
     const playing = p && p.state === "playing";
     const sel = this._hass.states[this._player];
     el.outname.textContent = sel ? sel.attributes.friendly_name : this._player;
-    el.play.innerHTML = `<ha-icon icon="${playing ? "mdi:stop" : "mdi:play"}"></ha-icon>`;
+    // rett etter et valg bruker MA/Cast noen sekunder på å komme i gang – vis det i stedet for «stoppet»
+    const starting = !playing && !!st && !this._userStopped && Date.now() - (this._localPlayAt || 0) < 25000;
+    el.play.innerHTML = `<ha-icon icon="${starting ? "mdi:loading" : playing ? "mdi:stop" : "mdi:play"}"></ha-icon>`;
+    el.play.classList.toggle("starting", starting);
     if (p && p.attributes.volume_level != null && (!this._volDrag || Date.now() - this._volDrag > 2000)) el.vol.value = Math.round(p.attributes.volume_level * 100);
     el.card.classList.toggle("playing", !!playing);
     el.live.classList.toggle("off", !playing);
+    const mus = !!(st && st.music);
+    el.prev.classList.toggle("hidden", !mus);
+    el.next.classList.toggle("hidden", !mus);
+    el.shuf.classList.toggle("hidden", !mus || !!(st && st.ext));
+    el.shuf.classList.toggle("on", !!(mus && p && p.attributes.shuffle));
+    el.fav.classList.toggle("hidden", mus && !st.uri); // musikk kan også være favoritt (ikke ukjent MA-avspilling)
+    el.livetxt.textContent = starting ? "STARTER…" : mus ? "SPILLER" : "DIREKTE";
 
-    if (!st || (!playing && !this._localPlayAt)) {
+    if (!st || (!playing && !this._localPlayAt && !this._musicHeld())) {
       // ingenting spiller: ikke lat som om sist valgte kanal er på
+      if (el.card.classList.contains("idle")) this._wake(); // ut av fullmodus, så kanalene er der igjen
       const last = this._data.last && this._station(this._data.last);
       el.card.style.removeProperty("--accent");
       el.bgimg.style.backgroundImage = "none";
-      el.art.classList.remove("show");
+      this._hideArt();
       el.artlogo.classList.remove("hidden");
       el.artlogo.dataset.id = "";
       el.title.textContent = "Ingenting spiller";
       el.artist.textContent = last ? `Sist: ${last.name} – trykk ▶ eller velg en kanal` : "Velg en kanal nederst";
       if (last && !st) this._current = null;
       this._pendingLast = last || null;
-      el.stname.textContent = el.program.textContent = el.history.textContent = "";
+      el.stname.textContent = el.program.textContent = el.history.textContent = ""; this._upHtml = null;
       el.artlogo.innerHTML = '<ha-icon icon="mdi:radio"></ha-icon>';
       el.badge.classList.add("hidden");
       el.progress.classList.add("hidden");
@@ -971,21 +1377,32 @@ class RadioNorgeCard extends HTMLElement {
     el.title.textContent = hasSong ? np.title : st.name;
     el.artist.textContent = hasSong ? np.artist : (np.title || st.tag || "");
     el.program.textContent = np.program ? np.program : (hasSong ? st.tag || "" : "");
-    el.history.innerHTML = np.history && np.history.length ? `<span>Nettopp spilt</span>${np.history.map((h) => `<div>${esc(h)}</div>`).join("")}` : "";
+    if (st.music) { this._musicUpcoming(); this._renderUpcoming(); }
+    else this._upHtml = null, el.history.innerHTML = np.history && np.history.length ? `<span>Nettopp spilt</span>${np.history.map((h) => `<div>${esc(h)}</div>`).join("")}` : "";
 
-    const art = hasSong ? (this._lookupArt(np.artist, np.title) || np.image) : null;
+    // Radio: ny sang på samme kanal mens coveret søkes opp: la forrige cover stå (ikke kanallogo eller
+    // et mellombilde fra MA), så tones det nye inn når det er funnet.
+    const look = !st.music && hasSong ? this._lookupArt(np.artist, np.title) : null;
+    const waiting = look === false && !!this._artFront && this._artStation === st.id;
+    const art = st.music ? (np.image || null) : hasSong ? (look || (waiting ? null : np.image) || null) : null;
     const logoHtml = st.logo ? `<img src="${esc(st.logo)}" alt="">` : `<span>${esc(initials(st.name))}</span>`;
     if (art) {
-      if (el.art.getAttribute("src") !== art) el.art.src = art;
-      el.art.classList.add("show");
+      // musikk fra MA: np.src er coveret via HA (virker også utenfor hjemmenettet), art er nøkkelen
+      const src = this._showArt(st.music && np.src ? np.src : art, art);
+      this._artStation = st.id; this._artGap = 0; clearTimeout(this._artWaitT);
       el.artlogo.classList.add("hidden");
-      el.bgimg.style.backgroundImage = `url("${art}")`;
+      el.bgimg.style.backgroundImage = `url("${src}")`;
       el.badge.classList.remove("hidden");
       el.badge.querySelector("span").textContent = st.name;
       const bi = el.badge.querySelector("img");
       if (st.logo) { bi.src = st.logo; bi.classList.remove("hidden"); } else bi.classList.add("hidden");
+    } else if (this._artFront && this._artStation === st.id && Date.now() - (this._artGap || (this._artGap = Date.now())) < 6000) {
+      // samme kanal, men nytt cover er ikke klart ennå: behold det forrige en liten stund i stedet for å
+      // blinke kanallogoen mellom to cover. Kommer det ikke noe cover, vises logoen etter 6 s.
+      clearTimeout(this._artWaitT);
+      this._artWaitT = setTimeout(() => this._updateNowPlaying(), 6100 - (Date.now() - this._artGap));
     } else {
-      el.art.classList.remove("show");
+      this._hideArt();
       el.artlogo.classList.remove("hidden");
       if (el.artlogo.dataset.id !== st.id) { el.artlogo.innerHTML = logoHtml; el.artlogo.dataset.id = st.id; }
       el.bgimg.style.backgroundImage = st.logo ? `url("${st.logo}")` : "none";
@@ -997,6 +1414,33 @@ class RadioNorgeCard extends HTMLElement {
       t.classList.toggle("active", t.dataset.id === st.id);
       t.classList.toggle("playing", !!playing);
     });
+  }
+
+  // Nytt cover med myk overgang: lastes i det skjulte bildet, tones inn over det gamle når det er klart,
+  // og det gamle skjules etterpå. Feiler lastingen, står forrige cover. key = coverets faste adresse
+  // (proxy-adressen får ny token hvert 5. minutt, men da er det samme bilde og ingenting skal skje).
+  _showArt(src, key) {
+    if (key === this._artKey) return this._artSrc;
+    this._artKey = key; this._artSrc = src;
+    const [a, b] = this._el.arts, front = this._artFront || null, back = front === a ? b : a;
+    const done = () => {
+      if (this._artKey !== key) return; // et nyere cover kom før dette var lastet
+      this._artFront = back;
+      back.style.zIndex = 1; if (front) front.style.zIndex = 0;
+      back.classList.add("show");
+      clearTimeout(this._artT);
+      if (front) this._artT = setTimeout(() => { if (this._artFront === back) front.classList.remove("show"); }, 900);
+    };
+    back.onload = done;
+    back.onerror = () => { if (this._artKey === key) this._artKey = null; }; // prøv igjen ved neste oppdatering
+    if (back.getAttribute("src") === src && back.complete && back.naturalWidth) done();
+    else back.src = src;
+    return src;
+  }
+  _hideArt() {
+    clearTimeout(this._artT);
+    this._artKey = null; this._artFront = null; this._artGap = 0;
+    this._el.arts.forEach((i) => i.classList.remove("show"));
   }
 
   _renderProgress() {
@@ -1040,7 +1484,7 @@ button { font:inherit; color:inherit; cursor:pointer; border:none; background:no
 .stage { position:relative; z-index:1; flex:1; display:flex; align-items:center; gap:clamp(24px,5vw,72px); padding:16px clamp(20px,5vw,72px); min-height:0; }
 .artwrap { position:relative; flex:0 0 auto; height:min(52vh, 42vw, 520px); aspect-ratio:1; }
 .art { position:relative; width:100%; height:100%; border-radius:22px; overflow:hidden; box-shadow:0 30px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.08); background:#fff; }
-.artimg { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity .6s; }
+.artimg { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity .8s; }
 .artimg.show { opacity:1; }
 .artlogo { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; padding:16%; background:#fff; }
 .artlogo img { max-width:100%; max-height:100%; object-fit:contain; }
@@ -1063,6 +1507,23 @@ ha-card.playing .dot { animation:pulse 1.6s infinite; }
 .history { font-size:13px; color:rgba(255,255,255,.55); margin-top:4px; }
 .history span { text-transform:uppercase; letter-spacing:.1em; font-size:11px; opacity:.8; }
 .history div { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.history .upi { cursor:pointer; font-size:14px; padding:2px 0; }
+.history .upi:hover { color:#fff; }
+.star.left { left:4px; right:auto; }
+.setglob { padding:6px 0 14px; }
+.sethd { margin-top:8px; font-size:16px; }
+.dock { transition:opacity .5s; }
+ha-card.idle .dock { position:absolute; left:0; right:0; bottom:0; opacity:0; pointer-events:none; }
+@media (min-width: 761px) {
+  .artwrap { transition:height .5s; }
+  ha-card.idle .artwrap { height:min(66vh, 44vw, 720px); }
+}
+.catbar { flex-wrap:wrap; row-gap:4px; }
+.catbar input { min-width:110px; }
+.catbar .mv { display:flex; align-items:center; padding:6px 8px; }
+.catbar .mv ha-icon { --mdc-icon-size:18px; }
+.play.starting ha-icon { display:inline-flex; animation:spin 1s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
 .controls { display:flex; align-items:center; gap:14px; margin-top:18px; flex-wrap:wrap; }
 .play { width:72px; height:72px; border-radius:50%; background:#fff; color:#111; display:flex; align-items:center; justify-content:center; box-shadow:0 10px 30px rgba(0,0,0,.4); transition:transform .15s; }
 .play:hover { transform:scale(1.06); }
@@ -1101,6 +1562,12 @@ ha-card.playing .dot { animation:pulse 1.6s infinite; }
 .catbar button { padding:6px 12px; border-radius:999px; font-size:13px; background:rgba(255,255,255,.12); }
 .catbar .done { background:#fff; color:#111; font-weight:600; }
 .catbar .del.armed { background:#c92a2a; }
+.catbar select { background:#222; color:#fff; border:1px solid rgba(255,255,255,.2); border-radius:8px; padding:6px 8px; font:inherit; font-size:13px; max-width:40%; }
+.catbar .newlbl { font-size:14px; white-space:nowrap; }
+.newkinds { flex:1; min-width:0; display:flex; gap:6px; overflow-x:auto; scrollbar-width:none; padding:6px 0; }
+.newkinds button { flex:0 0 auto; display:flex; align-items:center; gap:4px; }
+.newkinds ha-icon { --mdc-icon-size:16px; }
+.tabs button ha-icon.mus { color:rgba(255,255,255,.6); }
 .tile.adding .star { display:none; }
 .chk { position:absolute; top:2px; right:2px; z-index:2; width:34px; height:34px; border-radius:50%; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; }
 .chk ha-icon { --mdc-icon-size:24px; color:#fff; }
@@ -1130,6 +1597,10 @@ ha-card.playing .dot { animation:pulse 1.6s infinite; }
 .eq i { width:3px; background:#fff; border-radius:1px; animation:eq 1s infinite ease-in-out; }
 .eq i:nth-child(2) { animation-delay:-.4s; } .eq i:nth-child(3) { animation-delay:-.7s; }
 @keyframes eq { 0%,100% { height:3px; } 50% { height:12px; } }
+.tsub { font-size:11px; text-align:center; color:rgba(255,255,255,.55); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.logo.cover { padding:0; background:#1a1d26; }
+.logo.cover img { width:100%; height:100%; max-width:none; max-height:none; object-fit:cover; }
+.logo.circle { border-radius:50%; }
 .toast { position:absolute; left:50%; top:70px; transform:translateX(-50%); z-index:5; background:rgba(201,42,42,.95); padding:10px 16px; border-radius:10px; font-size:14px; }
 @media (max-width: 760px) {
   ha-card { height:auto; min-height:calc(100vh - var(--header-height, 56px) - 16px); }

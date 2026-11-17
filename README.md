@@ -6,12 +6,14 @@
 
 ## Funksjoner
 
-- **Spilles nå med cover** – sang, artist, program og fremdrift. Kilder: NRK sitt åpne API, Bauer sitt API (valgfri REST-pakke), ellers ICY-data fra strømmen via Music Assistant. Albumcover hentes fra iTunes.
+- **Spilles nå med cover** – sang, artist, program og fremdrift. Kilder: NRK sitt åpne API, Bauer sitt API (valgfri REST-pakke), ellers ICY-data fra strømmen via Music Assistant. Albumcover hentes fra iTunes. Nye cover tones mykt inn, og forrige cover blir stående til det neste er klart. Cover fra Music Assistant vises via Home Assistant, så de virker også utenfor hjemmenettet.
 - **Søk i hele verden** – via [Radio Browser](https://www.radio-browser.info/). Norske treff vises først.
-- **Favoritter per bruker** – nye brukere starter med NRK mP3, P5 Hits og Radio Norge, pluss en «Søk for flere kanaler»-flis.
-- **Egne kategorier per bruker** – «+ Lag kategori», gi den navn og legg til kanaler fra søket. Endre rekkefølge, gi nytt navn eller slett med ✎.
+- **Musikk fra Music Assistant** – Musikk-fanen søker etter sanger, artister, album og spillelister i musikkildene dine i Music Assistant (f.eks. YouTube Music, Spotify, Tidal). Uten søk vises spillelistene i biblioteket. Forrige/neste, tilfeldig rekkefølge og «Kommer» (sporene som spilles etterpå).
+- **Favoritter per bruker** – radio og musikk. Nye brukere starter med NRK mP3, P5 Hits og Radio Norge, pluss snarveiene «Finn radiokanaler» og «Finn musikk».
+- **Egne kategorier per bruker** – «+ Lag kategori», gi den navn og legg til radiokanaler og musikk. Endre rekkefølge, gi nytt navn eller slett med ✎. Fanene kan også flyttes.
 - **Utganger per bruker** – admin bestemmer hvilke høyttalere hver bruker får se (f.eks. bare den i samme rom). Hver bruker husker sin siste utgang.
-- **Følger med på hva som faktisk spiller** – startes radio fra en annen enhet eller bruker, viser kortet det, og hopper til riktig utgang.
+- **Fullmodus** – mens noe spilles, skjules faner og kanaler etter en stund uten berøring, så cover og sanginfo fyller skjermen. Et trykk henter dem tilbake.
+- **Følger med på hva som faktisk spiller** – startes radio fra en annen enhet eller bruker, viser kortet det, og hopper til riktig utgang. Kastes musikk fra en app på telefonen (f.eks. Spotify), vises det også.
 - **Robust avspilling** – raske kanalbytter gir bare ett kall, nytt forsøk hvis kanalen ikke starter, og automatisk omstart hvis strømmen faller ut.
 
 ## Krav
@@ -45,7 +47,7 @@ Sørg også for at hver spiller er **aktivert** og har **Expose player to Home A
 
 1. Kopier `racast-card.js` til `/config/www/racast/racast-card.js`
 2. **Innstillinger → Dashbord → ⋮ → Ressurser → Legg til ressurs**
-   - URL: `/local/racast/racast-card.js?v=2.2.0`
+   - URL: `/local/racast/racast-card.js?v=2.10.2`
    - Type: **JavaScript-modul**
 3. Hard-oppdater nettleseren (Ctrl+Shift+R)
 
@@ -85,6 +87,9 @@ Uten noen innstillinger finner kortet selv hvilken Music Assistant-spiller som h
 | `restrict_outputs` | `false` | `true`: brukere admin ikke har satt opp, får bare standardutgangen |
 | `bauer_sensor_prefix` | `sensor.radio_np_` | Prefiks for Bauer «spilles nå»-sensorer (se under) |
 | `nrk_direct` | `false` | Spill NRK direkte via Cast i stedet for via MA |
+| `idle_timeout` | `20` | Fullmodus: sekunder uten berøring før faner og kanaler skjules mens noe spilles (`0` = av). Admin kan overstyre for alle og per bruker under Innstillinger |
+| `ma_config_entry` | auto | Config entry-ID for Music Assistant-integrasjonen (brukes av Musikk-fanen). Finnes vanligvis automatisk |
+| `import_categories_from` | – | Overgang fra v1.x: todo-lista der kategoriene lå før. Hver bruker henter sine egne kategorier derfra én gang |
 
 Eksempel med Cast-gruppe og TV:
 
@@ -101,7 +106,7 @@ restrict_outputs: true
 
 ### Utganger per bruker
 
-Admin (HA-eieren eller brukere i `admin_users`) får **«Utganger per bruker…»** nederst i utgangsmenyen. Der velger du for hver person hvilke høyttalere de kan bruke, og hvilken som er standard. Innstillingen lagres i Home Assistant (`frontend/system_data`) og gjelder på alle enheter.
+Admin (HA-eieren eller brukere i `admin_users`) får **«Innstillinger…»** nederst i utgangsmenyen. Der velger du for hver person hvilke høyttalere de kan bruke og hvilken som er standard, og hvor lenge det går før fullmodus slår inn (for alle og per bruker). Innstillingene lagres i Home Assistant (`frontend/system_data`) og gjelder på alle enheter.
 
 HA sitt admin-flagg brukes bevisst ikke, fordi kiosk-/veggpanel-brukere ofte må være admin i HA av andre grunner.
 
@@ -123,8 +128,8 @@ Token lages i Music Assistant under **Innstillinger → Profil**. Slett den gjer
 
 ## Lagring
 
-- Favoritter, kategorier og siste utgang: per HA-bruker (`frontend/user_data`, nøkkel `radio_norge_card`)
-- Utganger per bruker: felles (`frontend/system_data`, samme nøkkel)
+- Favoritter, kategorier, rekkefølgen på fanene og siste utgang: per HA-bruker (`frontend/user_data`, nøkkel `radio_norge_card`)
+- Utganger per bruker og fullmodus: felles (`frontend/system_data`, samme nøkkel)
 
 ## Eksterne tjenester
 
