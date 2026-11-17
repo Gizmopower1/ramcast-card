@@ -1,8 +1,10 @@
 /*
- * RACast – fullskjerms nettradio for Home Assistant: faste (norske) kanaler + søk i radiokanaler fra hele verden
- * (Radio Browser), favoritter og egne kategorier per bruker, utganger per bruker (styres av admin).
+ * RAMcast – Radio And Music Cast. Fullskjerms radio og musikk for Home Assistant:
+ *   - radio: faste (norske) kanaler + søk i radiokanaler fra hele verden (Radio Browser)
+ *   - musikk fra Music Assistant: YouTube Music, Spotify, Tidal, Apple Music, Deezer, Qobuz, SoundCloud …
+ * Favoritter og egne kategorier per bruker (radio og musikk om hverandre), utganger per bruker (styres av admin).
  *
- *   type: custom:racast-card          # (custom:radio-norge-card virker også)
+ *   type: custom:ramcast-card         # (de gamle navnene custom:racast-card og custom:radio-norge-card virker også)
  *   default_player: media_player.x   # valgfritt, ellers første Music Assistant-spiller
  *   ma_players:                      # valgfritt: Cast-spiller -> MA-spiller (finnes ellers automatisk)
  *     media_player.kjokken: media_player.kjokken_ma
@@ -20,7 +22,7 @@
  * Favoritter og rekkefølge lagres per HA-bruker (frontend/user_data), synkes mellom enheter.
  */
 
-const VERSION = "2.10.2";
+const VERSION = "2.11.0";
 // Alle faste kanaler ligger i MA sitt radiobibliotek (builtin/add_radio) med navn + logo, nøklet på st.url.
 // MA slår opp URL-en der, så TV-en viser riktig navn og logo. Nye faste kanaler må legges inn i MA på samme måte.
 // Søketreff spilles via Radio Browser-kilden i MA, som har egne navn + logoer.
@@ -123,7 +125,7 @@ class RadioNorgeCard extends HTMLElement {
       // finn Cast-spiller -> MA-spiller selv (samme enhets-ID i enhetsregisteret). ma_players overstyrer
       auto_twins: true,
       nrk_direct: false,
-      title: "RACast", // navnet øverst til venstre
+      title: "RAMcast", // navnet øverst til venstre
       // hvem som kan styre «Utganger per bruker»: HA-eieren + disse bruker-id-ene (HA sitt admin-flagg brukes ikke,
       // fordi kiosk-brukere ofte må være admin i HA av andre grunner)
       admin_users: [],
@@ -1612,9 +1614,9 @@ ha-card.idle .dock { position:absolute; left:0; right:0; bottom:0; opacity:0; po
 }
 `;
 
-customElements.define("racast-card", RadioNorgeCard);
-// gammelt navn beholdes slik at eksisterende dashbord (custom:radio-norge-card) virker
-customElements.define("radio-norge-card", class extends RadioNorgeCard {});
+customElements.define("ramcast-card", RadioNorgeCard);
+// gamle navn beholdes slik at eksisterende dashbord (custom:racast-card, custom:radio-norge-card) virker
+for (const old of ["racast-card", "radio-norge-card"]) if (!customElements.get(old)) customElements.define(old, class extends RadioNorgeCard {});
 window.customCards = window.customCards || [];
-window.customCards.push({ type: "racast-card", name: "RACast", description: "Fullskjerms nettradio med faste kanaler og søk i radiokanaler fra hele verden, favoritter og egne kategorier per bruker, live sanginfo og utganger per bruker." });
-console.info(`%c RACAST-CARD %c ${VERSION} `, "background:#d71d2f;color:#fff;font-weight:700", "background:#222;color:#fff");
+window.customCards.push({ type: "ramcast-card", name: "RAMcast – Radio And Music Cast", description: "Fullskjerms radio og musikk: norske radiokanaler og søk i radiokanaler fra hele verden, pluss musikk fra Music Assistant (YouTube Music, Spotify, Tidal …). Favoritter og egne kategorier per bruker, live sanginfo med cover og utganger per bruker." });
+console.info(`%c RAMCAST %c ${VERSION} `, "background:#d71d2f;color:#fff;font-weight:700", "background:#222;color:#fff");

@@ -1,8 +1,15 @@
-# RACast
+# RAMcast – Radio And Music Cast
 
-*Fullscreen web radio card for Home Assistant – Norwegian stations built in, search any station worldwide (Radio Browser), per-user favourites and categories, per-user speakers, live song info and cover art. Plays through Music Assistant.*
+*Fullscreen radio and music card for Home Assistant – Norwegian radio stations built in, search any station worldwide (Radio Browser), and play music from your Music Assistant sources (YouTube Music, Spotify, Tidal …). Per-user favourites and categories, per-user speakers, live song info and cover art.*
 
-**RACast** er et fullskjerms nettradiokort for Home Assistant. De vanligste norske kanalene (NRK, P4-gruppen, Bauer) ligger inne fra start, og du kan søke opp radiokanaler fra hele verden. Kortet viser hva som spilles nå med albumcover, og alt spilles gjennom **Music Assistant** til Google Cast-høyttalere, grupper eller TV.
+**RAMcast** er et fullskjerms kort for **radio og musikk** i Home Assistant:
+
+- **Radio** – de vanligste norske kanalene (NRK, P4-gruppen, Bauer) ligger inne fra start, og du kan søke opp radiokanaler fra hele verden.
+- **Musikk** – søk og spill sanger, artister, album og spillelister fra musikkildene du har i **Music Assistant**, som YouTube Music, Spotify, Tidal, Apple Music, Deezer, Qobuz og SoundCloud.
+
+Kortet viser hva som spilles nå med cover, og alt spilles gjennom Music Assistant til Google Cast-høyttalere, grupper eller TV.
+
+> Tidligere het kortet **RACast**. De gamle kortnavnene `custom:racast-card` og `custom:radio-norge-card` virker fortsatt.
 
 ## Funksjoner
 
@@ -29,7 +36,7 @@ Direkte Cast fra Home Assistant fungerer dårlig for nettradio:
 - mange radioservere (bl.a. P4-gruppen og Bauer) sender for lite buffer ved oppstart, så Cast kan bruke 15–20 s på å starte
 - å bytte mellom direkte Cast og Music Assistant på samme høyttaler får høyttaleren til å bytte mottaker-app – du hører «blipp»-lyden, og kanalen starter tregt eller ikke i det hele tatt
 
-RACast spiller derfor alt via Music Assistant. **Viktig innstilling i Music Assistant** – for hver Google Cast-spiller og gruppe du bruker:
+RAMcast spiller derfor alt via Music Assistant. **Viktig innstilling i Music Assistant** – for hver Google Cast-spiller og gruppe du bruker:
 
 1. Åpne Music Assistant → **Innstillinger → Spillere** → velg spilleren
 2. Trykk **Vis avanserte innstillinger** nederst
@@ -45,9 +52,9 @@ Sørg også for at hver spiller er **aktivert** og har **Expose player to Home A
 
 ### Manuelt
 
-1. Kopier `racast-card.js` til `/config/www/racast/racast-card.js`
+1. Kopier `ramcast-card.js` til `/config/www/ramcast/ramcast-card.js`
 2. **Innstillinger → Dashbord → ⋮ → Ressurser → Legg til ressurs**
-   - URL: `/local/racast/racast-card.js?v=2.10.2`
+   - URL: `/local/ramcast/ramcast-card.js?v=2.11.0`
    - Type: **JavaScript-modul**
 3. Hard-oppdater nettleseren (Ctrl+Shift+R)
 
@@ -63,11 +70,11 @@ Lag gjerne et eget dashbord med en **panel**-visning, så kortet fyller hele skj
 
 ```yaml
 views:
-  - title: RACast
+  - title: RAMcast
     path: radio
     type: panel
     cards:
-      - type: custom:racast-card
+      - type: custom:ramcast-card
 ```
 
 Uten noen innstillinger finner kortet selv hvilken Music Assistant-spiller som hører til hver Cast-høyttaler (de har samme enhets-ID). Høyttaleren vises én gang, med Cast-navnet, og spilles via Music Assistant. Standardutgang er en MA-gruppe hvis du har en, ellers første MA-spiller. Bruk `ma_only: true` for å skjule høyttalere som ikke finnes i Music Assistant.
@@ -76,7 +83,7 @@ Uten noen innstillinger finner kortet selv hvilken Music Assistant-spiller som h
 
 | Valg | Standard | Beskrivelse |
 |---|---|---|
-| `title` | `RACast` | Navnet øverst til venstre |
+| `title` | `RAMcast` | Navnet øverst til venstre |
 | `default_player` | første MA-spiller | Standard utgang |
 | `ma_players` | `{}` | Kobler en Cast-entitet til en MA-spiller manuelt, f.eks. `media_player.stue: media_player.stue_ma`. Trengs vanligvis ikke (se `auto_twins`), men overstyrer den automatiske koblingen |
 | `auto_twins` | `true` | Finn Cast → MA-spiller automatisk via enhetsregisteret |
@@ -94,7 +101,7 @@ Uten noen innstillinger finner kortet selv hvilken Music Assistant-spiller som h
 Eksempel med Cast-gruppe og TV:
 
 ```yaml
-type: custom:racast-card
+type: custom:ramcast-card
 default_player: media_player.hele_huset
 extra_players:
   - media_player.tv

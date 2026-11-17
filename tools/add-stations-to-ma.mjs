@@ -2,11 +2,11 @@
 // Da viser MA (og Cast-skjermer som Google TV / Nest Hub) «P5 Hits» med logo i stedet for «P05_MM».
 //
 // Bruk (Node 22+):
-//   MA_URL=http://<ma-ip>:8095 MA_TOKEN=<langtids-token fra MA> node tools/add-stations-to-ma.mjs [racast-card.js]
+//   MA_URL=http://<ma-ip>:8095 MA_TOKEN=<langtids-token fra MA> node tools/add-stations-to-ma.mjs [ramcast-card.js]
 // Lag token i Music Assistant: Innstillinger → Profil → Langtids-tokens. Slett den gjerne etterpå.
 import fs from "fs";
 
-const file = process.argv[2] || new URL("../racast-card.js", import.meta.url).pathname;
+const file = process.argv[2] || new URL("../ramcast-card.js", import.meta.url).pathname;
 const { MA_URL, MA_TOKEN } = process.env;
 if (!MA_URL || !MA_TOKEN) { console.error("Sett MA_URL og MA_TOKEN"); process.exit(1); }
 
